@@ -61,7 +61,7 @@ describe('update check', () => {
 
   it('takes the repo from package.json', () => {
     expect(REPO).toMatch(/^[\w.-]+\/termchat$/);
-    expect(INSTALL_CMD).toBe(`npm i -g github:${REPO}`);
+    expect(INSTALL_CMD).toBe(`npm i -g https://github.com/${REPO}/tarball/main`);
     expect(registry.find('update')?.name).toBe('update');
   });
 

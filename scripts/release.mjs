@@ -3,8 +3,8 @@
 // Checks, bumps the version, builds dist/, commits + tags and pushes. Everyone running
 // termchat gets told about the new version on their next launch.
 //
-// dist/ is committed on purpose: `npm i -g github:…` installs it as is. (Building during a
-// global install from git doesn't work reliably – npm doesn't install the build tools there.)
+// dist/ is committed on purpose: the install command (`npm i -g <GitHub tarball of main>`)
+// installs it as is, with no build step and no git needed.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 

@@ -18,10 +18,10 @@ No server, no account: anyone on the same Wi-Fi shows up automatically.
 
 ## Installation
 
-Requires [Node.js](https://nodejs.org) 22 or newer and git.
+Requires [Node.js](https://nodejs.org) 22 or newer.
 
 ```sh
-npm i -g github:trigonyx/termchat
+npm i -g https://github.com/trigonyx/termchat/tarball/main
 termchat
 ```
 
@@ -32,11 +32,11 @@ termchat checks for a new version every time it starts. If there is one, the hea
 
 - inside termchat: `/update` (installs it and offers to restart)
 - in a terminal: `termchat update`
-- or the install command again: `npm i -g github:trigonyx/termchat`
+- or the install command again: `npm i -g https://github.com/trigonyx/termchat/tarball/main`
 
 Your profile, contacts and chats live in `~/.termchat` and are kept across updates.
 
-If npm says `EACCES` (no permission to install globally), either use `sudo npm i -g github:trigonyx/termchat`
+If npm says `EACCES` (no permission to install globally), either use `sudo npm i -g https://github.com/trigonyx/termchat/tarball/main`
 or install Node via a version manager such as [nvm](https://github.com/nvm-sh/nvm), [fnm](https://github.com/Schniz/fnm) or Homebrew.
 
 ## How it works

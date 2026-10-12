@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { REPO, REPO_CONFIGURED, VERSION } from './version.js';
+import { INSTALL_CMD, INSTALL_SPEC, REPO, REPO_CONFIGURED, VERSION } from './version.js';
 
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
@@ -17,7 +17,7 @@ export function compareVersions(a: string, b: string): number {
 }
 
 /** package.json of the default branch; TERMCHAT_UPDATE_URL overrides it (testing). */
-export const latestUrl = () => process.env.TERMCHAT_UPDATE_URL || `https://raw.githubusercontent.com/${REPO}/HEAD/package.json`;
+export const latestUrl = () => process.env.TERMCHAT_UPDATE_URL || `https://raw.githubusercontent.com/${REPO}/main/package.json`;
 
 /** Version published on GitHub, or null if it can't be determined (offline, timeout, garbage …). */
 export async function fetchLatestVersion(fetchImpl: typeof fetch = fetch, timeoutMs = 5000): Promise<string | null> {
@@ -39,7 +39,7 @@ export async function checkForUpdate(fetchImpl?: typeof fetch): Promise<string |
   return latest && compareVersions(latest, VERSION) > 0 ? latest : null;
 }
 
-/** `npm` = installed with `npm i -g github:…`; `source` = a checkout (`npm run dev`, `npm link`). */
+/** `npm` = installed with `npm i -g …`; `source` = a checkout (`npm run dev`, `npm link`). */
 export function installKind(script = process.argv[1] ?? ''): 'npm' | 'source' {
   let real = script;
   try {
@@ -50,16 +50,16 @@ export function installKind(script = process.argv[1] ?? ''): 'npm' | 'source' {
   return real.split(path.sep).join('/').includes('/node_modules/termchat/') ? 'npm' : 'source';
 }
 
-export const SOURCE_HINT = `This termchat runs from a source folder, so it doesn't update itself.\nUpdate it there with \`git pull && npm install\`, or install the release with \`npm i -g github:${REPO}\`.`;
+export const SOURCE_HINT = `This termchat runs from a source folder, so it doesn't update itself.\nUpdate it there with \`git pull && npm install\`, or install the release with \`${INSTALL_CMD}\`.`;
 
-/** Runs `npm install -g github:<repo>`. `inherit` shows npm's output in the terminal, otherwise it's captured. */
+/** Runs the install command (always fetching the latest tarball, never npm's cached copy). `inherit` shows npm's output in the terminal, otherwise it's captured. */
 export function runInstall({ inherit }: { inherit: boolean }): Promise<{ ok: boolean; output: string }> {
   if (!REPO_CONFIGURED) return Promise.resolve({ ok: false, output: 'The GitHub repo is not set in package.json yet.' });
   return new Promise((resolve) => {
     const win = process.platform === 'win32';
     let output = '';
     try {
-      const p = spawn(win ? 'npm.cmd' : 'npm', ['install', '-g', `github:${REPO}`], {
+      const p = spawn(win ? 'npm.cmd' : 'npm', ['install', '-g', '--prefer-online', INSTALL_SPEC], {
         stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
         shell: win,
       });
@@ -76,9 +76,8 @@ export function runInstall({ inherit }: { inherit: boolean }): Promise<{ ok: boo
 /** A hint for the most common install failure. */
 export function installHint(output: string): string | null {
   if (/EACCES|permission denied/i.test(output)) {
-    return `npm isn't allowed to write to its global folder. Run \`sudo npm i -g github:${REPO}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
+    return `npm isn't allowed to write to its global folder. Run \`sudo ${INSTALL_CMD}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
   }
-  if (/ENOENT.*git|spawn git/i.test(output)) return 'npm needs git to install from GitHub – install git and try again.';
   return null;
 }
 

@@ -83,7 +83,8 @@ var package_default = {
 var VERSION = package_default.version;
 var REPO = /github\.com[/:]([^/]+\/[^/.]+)/.exec(package_default.repository.url)?.[1] ?? "OWNER/termchat";
 var REPO_CONFIGURED = !REPO.startsWith("OWNER/");
-var INSTALL_CMD = `npm i -g github:${REPO}`;
+var INSTALL_SPEC = `https://github.com/${REPO}/tarball/main`;
+var INSTALL_CMD = `npm i -g ${INSTALL_SPEC}`;
 
 // src/core/update.ts
 var VERSION_RE = /^\d+\.\d+\.\d+$/;
@@ -96,7 +97,7 @@ function compareVersions(a, b) {
   }
   return 0;
 }
-var latestUrl = () => process.env.TERMCHAT_UPDATE_URL || `https://raw.githubusercontent.com/${REPO}/HEAD/package.json`;
+var latestUrl = () => process.env.TERMCHAT_UPDATE_URL || `https://raw.githubusercontent.com/${REPO}/main/package.json`;
 async function fetchLatestVersion(fetchImpl = fetch, timeoutMs = 5e3) {
   if (!REPO_CONFIGURED && !process.env.TERMCHAT_UPDATE_URL) return null;
   try {
@@ -122,14 +123,14 @@ function installKind(script = process.argv[1] ?? "") {
   return real.split(path2.sep).join("/").includes("/node_modules/termchat/") ? "npm" : "source";
 }
 var SOURCE_HINT = `This termchat runs from a source folder, so it doesn't update itself.
-Update it there with \`git pull && npm install\`, or install the release with \`npm i -g github:${REPO}\`.`;
+Update it there with \`git pull && npm install\`, or install the release with \`${INSTALL_CMD}\`.`;
 function runInstall({ inherit }) {
   if (!REPO_CONFIGURED) return Promise.resolve({ ok: false, output: "The GitHub repo is not set in package.json yet." });
   return new Promise((resolve) => {
     const win = process.platform === "win32";
     let output = "";
     try {
-      const p = spawn(win ? "npm.cmd" : "npm", ["install", "-g", `github:${REPO}`], {
+      const p = spawn(win ? "npm.cmd" : "npm", ["install", "-g", "--prefer-online", INSTALL_SPEC], {
         stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
         shell: win
       });
@@ -145,9 +146,8 @@ ${err.message}` }));
 }
 function installHint(output) {
   if (/EACCES|permission denied/i.test(output)) {
-    return `npm isn't allowed to write to its global folder. Run \`sudo npm i -g github:${REPO}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
+    return `npm isn't allowed to write to its global folder. Run \`sudo ${INSTALL_CMD}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
   }
-  if (/ENOENT.*git|spawn git/i.test(output)) return "npm needs git to install from GitHub \u2013 install git and try again.";
   return null;
 }
 var restart = false;

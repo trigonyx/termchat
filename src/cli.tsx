@@ -24,7 +24,7 @@ const ALT_SCREEN_ON = '\u001b[?1049h\u001b[H';
 const ALT_SCREEN_OFF = '\u001b[?1049l';
 const SHOW_CURSOR = '\u001b[?25h';
 
-/** `termchat update`: same as running `npm i -g github:<repo>`, with a version check first. */
+/** `termchat update`: same as running INSTALL_CMD, with a version check first. */
 async function update(): Promise<number> {
   if (installKind() === 'source') {
     process.stdout.write(`${SOURCE_HINT.replace(/`/g, '')}\n`);
