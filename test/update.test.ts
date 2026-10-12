@@ -1,6 +1,18 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { registry } from '../src/commands/builtin.js';
-import { checkForUpdate, compareVersions, fetchLatestVersion, installHint, installKind } from '../src/core/update.js';
+import {
+  checkForUpdate,
+  compareVersions,
+  fetchLatestVersion,
+  installedVersion,
+  installHint,
+  installKind,
+  releaseSpec,
+  staleInstallHint,
+} from '../src/core/update.js';
 import { INSTALL_CMD, REPO, REPO_CONFIGURED, VERSION } from '../src/core/version.js';
 
 const reply = (body: unknown, ok = true) =>
@@ -63,6 +75,22 @@ describe('update check', () => {
     expect(REPO).toMatch(/^[\w.-]+\/termchat$/);
     expect(INSTALL_CMD).toBe(`npm i -g https://github.com/${REPO}/tarball/main`);
     expect(registry.find('update')?.name).toBe('update');
+  });
+
+  it('installs a version from its release tag, not from main', () => {
+    expect(releaseSpec('1.2.3')).toBe(`https://github.com/${REPO}/tarball/v1.2.3`);
+  });
+
+  it('asks the installed termchat which version it is', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'termchat-ver-'));
+    const ok = path.join(dir, 'ok.js');
+    fs.writeFileSync(ok, 'console.log("termchat 4.5.6")');
+    const broken = path.join(dir, 'broken.js');
+    fs.writeFileSync(broken, 'process.exit(3)');
+    expect(await installedVersion(ok)).toBe('4.5.6');
+    expect(await installedVersion(broken)).toBeNull();
+    expect(await installedVersion(path.join(dir, 'missing.js'))).toBeNull();
+    expect(staleInstallHint('1.0.0')).toContain('npm uninstall -g termchat');
   });
 
   it('explains common install failures', () => {

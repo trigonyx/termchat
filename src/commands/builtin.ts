@@ -2,7 +2,17 @@ import net from 'node:net';
 import { copyToClipboard } from '../core/clipboard.js';
 import { exportChat } from '../core/export.js';
 import { formatId } from '../core/identity.js';
-import { compareVersions, fetchLatestVersion, installHint, installKind, requestRestart, runInstall, SOURCE_HINT } from '../core/update.js';
+import {
+  compareVersions,
+  fetchLatestVersion,
+  installedVersion,
+  installHint,
+  installKind,
+  requestRestart,
+  runInstall,
+  SOURCE_HINT,
+  staleInstallHint,
+} from '../core/update.js';
 import { VERSION } from '../core/version.js';
 import { DEFAULT_PORT } from '../core/network.js';
 import type { GroupView } from '../core/store.js';
@@ -402,12 +412,15 @@ export const builtinCommands: Command[] = [
       }
       if (!(await ctx.ui.confirm(`Update termchat ${VERSION} → ${latest}?`))) return;
       ctx.ui.print(`Installing termchat ${latest} … (this can take a minute)`);
-      const res = await runInstall({ inherit: false });
+      const res = await runInstall({ inherit: false, version: latest });
       if (!res.ok) {
         const tail = res.output.trim().split('\n').slice(-6).join('\n');
         const hint = installHint(res.output);
         throw new Error(hint ?? `npm reported:\n\`\`\`\n${tail}\n\`\`\``);
       }
+      // don't claim success before the new version is really there
+      const installed = await installedVersion();
+      if (installed && compareVersions(installed, latest) < 0) throw new Error(staleInstallHint(installed));
       ctx.store.setUpdateAvailable(null);
       if (await ctx.ui.confirm(`Updated to ${latest}. Restart termchat now?`)) {
         requestRestart();

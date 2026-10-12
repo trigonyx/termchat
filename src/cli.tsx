@@ -2,7 +2,17 @@ import { render } from 'ink';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { resolvePaths } from './core/paths.js';
-import { fetchLatestVersion, compareVersions, installHint, installKind, restartRequested, runInstall, SOURCE_HINT } from './core/update.js';
+import {
+  fetchLatestVersion,
+  compareVersions,
+  installedVersion,
+  installHint,
+  installKind,
+  restartRequested,
+  runInstall,
+  SOURCE_HINT,
+  staleInstallHint,
+} from './core/update.js';
 import { REPO_CONFIGURED, VERSION } from './core/version.js';
 import { Root } from './ui/App.js';
 import { MOUSE_OFF, MOUSE_ON, MouseFilterStdin } from './ui/mouse.js';
@@ -41,9 +51,14 @@ async function update(): Promise<number> {
     return 0;
   }
   process.stdout.write(latest ? `Updating termchat ${VERSION} → ${latest} …\n` : `Couldn't check the latest version – installing anyway …\n`);
-  const res = await runInstall({ inherit: true });
+  const res = await runInstall({ inherit: true, version: latest });
   if (res.ok) {
-    process.stdout.write(`\nDone${latest ? ` – termchat ${latest} is installed` : ''}. Start it with: termchat\n`);
+    const installed = await installedVersion();
+    if (installed && latest && compareVersions(installed, latest) < 0) {
+      process.stderr.write(`\n${staleInstallHint(installed).replace(/`/g, '')}\n`);
+      return 1;
+    }
+    process.stdout.write(`\nDone${installed ? ` – termchat ${installed} is installed` : ''}. Start it with: termchat\n`);
     return 0;
   }
   process.stderr.write(`\nUpdate failed. ${installHint(res.output) ?? 'See the npm output above.'}\n`);

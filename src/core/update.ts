@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { INSTALL_CMD, INSTALL_SPEC, REPO, REPO_CONFIGURED, VERSION } from './version.js';
@@ -52,14 +52,18 @@ export function installKind(script = process.argv[1] ?? ''): 'npm' | 'source' {
 
 export const SOURCE_HINT = `This termchat runs from a source folder, so it doesn't update itself.\nUpdate it there with \`git pull && npm install\`, or install the release with \`${INSTALL_CMD}\`.`;
 
-/** Runs the install command (always fetching the latest tarball, never npm's cached copy). `inherit` shows npm's output in the terminal, otherwise it's captured. */
-export function runInstall({ inherit }: { inherit: boolean }): Promise<{ ok: boolean; output: string }> {
-  if (!REPO_CONFIGURED) return Promise.resolve({ ok: false, output: 'The GitHub repo is not set in package.json yet.' });
+/**
+ * What to install for a known version: the tarball of its release tag. Unlike main's,
+ * it can't be stale right after a release, and npm sees a new URL for every version.
+ */
+export const releaseSpec = (version: string) => `https://github.com/${REPO}/tarball/v${version}`;
+
+function npmInstall(spec: string, inherit: boolean): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
     const win = process.platform === 'win32';
     let output = '';
     try {
-      const p = spawn(win ? 'npm.cmd' : 'npm', ['install', '-g', '--prefer-online', INSTALL_SPEC], {
+      const p = spawn(win ? 'npm.cmd' : 'npm', ['install', '-g', '--prefer-online', spec], {
         stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
         shell: win,
       });
@@ -72,6 +76,35 @@ export function runInstall({ inherit }: { inherit: boolean }): Promise<{ ok: boo
     }
   });
 }
+
+/**
+ * Installs `version` (or main, if it's unknown) with npm, always fetching the tarball
+ * instead of using npm's cached copy. `inherit` shows npm's output in the terminal,
+ * otherwise it's captured.
+ */
+export async function runInstall({ inherit, version }: { inherit: boolean; version?: string | null }): Promise<{ ok: boolean; output: string }> {
+  if (!REPO_CONFIGURED) return { ok: false, output: 'The GitHub repo is not set in package.json yet.' };
+  if (version) {
+    const res = await npmInstall(releaseSpec(version), inherit);
+    // no tag for this version (pushed without tags?) – fall back to main
+    if (res.ok || installHint(res.output)) return res;
+  }
+  return npmInstall(INSTALL_SPEC, inherit);
+}
+
+/** The version a restart would run, asked from the installed termchat itself (null if unknown). */
+export function installedVersion(script = process.argv[1] ?? ''): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [script, '--version'], { timeout: 15_000 }, (err, stdout) => {
+      const version = /termchat (\d+\.\d+\.\d+)/.exec(String(stdout))?.[1];
+      resolve(err || !version ? null : version);
+    });
+  });
+}
+
+/** Shown when npm succeeded but the old version is still installed. */
+export const staleInstallHint = (installed: string) =>
+  `npm finished, but termchat ${installed} is still installed. Reinstall it with \`npm uninstall -g termchat\` and then \`${INSTALL_CMD}\`.`;
 
 /** A hint for the most common install failure. */
 export function installHint(output: string): string | null {

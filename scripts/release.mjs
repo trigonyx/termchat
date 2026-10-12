@@ -26,6 +26,7 @@ if (dirty.length) {
   process.exit(1);
 }
 
+let tagged = false;
 try {
   run(npm, ['run', 'typecheck']);
   run(npm, ['test']);
@@ -35,9 +36,16 @@ try {
   run('git', ['add', 'package.json', 'package-lock.json', 'dist']);
   run('git', ['commit', '-m', `Release v${version}`]);
   run('git', ['tag', '-a', `v${version}`, '-m', `Release v${version}`]); // annotated: pushed by --follow-tags
+  tagged = true;
+  // the tag matters: updates install the tarball of v<version>, not of main
   run('git', ['push', '--follow-tags']);
   console.log(`\nReleased v${version}. Friends see the update the next time they start termchat.`);
 } catch {
+  if (tagged) {
+    console.error('\nThe release commit and tag exist, but pushing failed. Publish them with: git push --follow-tags');
+    console.error('(a plain `git push` leaves the tag behind, and updates need it)');
+    process.exit(1);
+  }
   console.error('\nRelease aborted.');
   process.exit(1);
 }
