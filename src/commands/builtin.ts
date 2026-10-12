@@ -406,7 +406,7 @@ export const builtinCommands: Command[] = [
       if (!res.ok) {
         const tail = res.output.trim().split('\n').slice(-6).join('\n');
         const hint = installHint(res.output);
-        throw new Error(`Update failed${hint ? ` – ${hint}` : ':'}${hint ? '' : `\n\`\`\`\n${tail}\n\`\`\``}`);
+        throw new Error(hint ?? `npm reported:\n\`\`\`\n${tail}\n\`\`\``);
       }
       ctx.store.setUpdateAvailable(null);
       if (await ctx.ui.confirm(`Updated to ${latest}. Restart termchat now?`)) {

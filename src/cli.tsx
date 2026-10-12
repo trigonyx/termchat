@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { resolvePaths } from './core/paths.js';
 import { fetchLatestVersion, compareVersions, installHint, installKind, restartRequested, runInstall, SOURCE_HINT } from './core/update.js';
-import { VERSION } from './core/version.js';
+import { REPO_CONFIGURED, VERSION } from './core/version.js';
 import { Root } from './ui/App.js';
 import { MOUSE_OFF, MOUSE_ON, MouseFilterStdin } from './ui/mouse.js';
 
@@ -28,6 +28,10 @@ const SHOW_CURSOR = '\u001b[?25h';
 async function update(): Promise<number> {
   if (installKind() === 'source') {
     process.stdout.write(`${SOURCE_HINT.replace(/`/g, '')}\n`);
+    return 1;
+  }
+  if (!REPO_CONFIGURED) {
+    process.stderr.write("This build doesn't know its GitHub repo yet (package.json → repository).\n");
     return 1;
   }
   process.stdout.write('Checking for updates …\n');

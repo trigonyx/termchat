@@ -3380,10 +3380,10 @@ Reachable at ${addr}`);
       if (!res.ok) {
         const tail = res.output.trim().split("\n").slice(-6).join("\n");
         const hint = installHint(res.output);
-        throw new Error(`Update failed${hint ? ` \u2013 ${hint}` : ":"}${hint ? "" : `
+        throw new Error(hint ?? `npm reported:
 \`\`\`
 ${tail}
-\`\`\``}`);
+\`\`\``);
       }
       ctx.store.setUpdateAvailable(null);
       if (await ctx.ui.confirm(`Updated to ${latest}. Restart termchat now?`)) {
@@ -5014,6 +5014,10 @@ async function update() {
   if (installKind() === "source") {
     process.stdout.write(`${SOURCE_HINT.replace(/`/g, "")}
 `);
+    return 1;
+  }
+  if (!REPO_CONFIGURED) {
+    process.stderr.write("This build doesn't know its GitHub repo yet (package.json \u2192 repository).\n");
     return 1;
   }
   process.stdout.write("Checking for updates \u2026\n");
