@@ -35,11 +35,11 @@ var package_default = {
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
-    url: "git+https://github.com/OWNER/termchat.git"
+    url: "git+https://github.com/trigonyx/termchat.git"
   },
-  homepage: "https://github.com/OWNER/termchat#readme",
+  homepage: "https://github.com/trigonyx/termchat#readme",
   bugs: {
-    url: "https://github.com/OWNER/termchat/issues"
+    url: "https://github.com/trigonyx/termchat/issues"
   },
   type: "module",
   bin: {

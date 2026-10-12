@@ -21,7 +21,7 @@ No server, no account: anyone on the same Wi-Fi shows up automatically.
 Requires [Node.js](https://nodejs.org) 22 or newer and git.
 
 ```sh
-npm i -g github:OWNER/termchat
+npm i -g github:trigonyx/termchat
 termchat
 ```
 
@@ -32,11 +32,11 @@ termchat checks for a new version every time it starts. If there is one, the hea
 
 - inside termchat: `/update` (installs it and offers to restart)
 - in a terminal: `termchat update`
-- or the install command again: `npm i -g github:OWNER/termchat`
+- or the install command again: `npm i -g github:trigonyx/termchat`
 
 Your profile, contacts and chats live in `~/.termchat` and are kept across updates.
 
-If npm says `EACCES` (no permission to install globally), either use `sudo npm i -g github:OWNER/termchat`
+If npm says `EACCES` (no permission to install globally), either use `sudo npm i -g github:trigonyx/termchat`
 or install Node via a version manager such as [nvm](https://github.com/nvm-sh/nvm), [fnm](https://github.com/Schniz/fnm) or Homebrew.
 
 ## How it works
@@ -144,8 +144,8 @@ termchat --home <dir>      # different data directory (default ~/.termchat)
 Two instances on one machine (to try it out):
 
 ```sh
-npm run dev -- --home /tmp/alice --port 5060
-npm run dev -- --home /tmp/bob   --port 5061
+termchat --home /tmp/alice --port 5060
+termchat --home /tmp/bob   --port 5061
 ```
 
 ## Data
@@ -158,31 +158,3 @@ Everything lives in `~/.termchat/` (readable only by you):
 - `history/<id>.jsonl`: chat histories
 - `groups/<gid>.jsonl`, `groups.json`: group logs and unread counters
 - `peers.json`: addresses of group members who aren't contacts
-
-## Development
-
-```sh
-git clone https://github.com/OWNER/termchat.git
-cd termchat
-npm install
-npm run dev        # run from source without building
-npm run build      # build dist/ – then `npm link` makes `termchat` point at this folder
-
-npm test           # unit and integration tests (including two real instances over localhost)
-npm run typecheck
-npm run build
-```
-
-**Releasing:** commit your changes, then run `npm run release` (or `npm run release minor` / `major`).
-It runs the checks, bumps the version in `package.json`, builds `dist/`, commits, tags and pushes.
-`dist/` is committed on purpose: installs from GitHub use it as is, so they don't need any build tools. Everyone gets told about
-the new version the next time they start termchat. Pushing without a release doesn't notify anybody.
-
-The update check reads `package.json` on GitHub; set `TERMCHAT_NO_UPDATE_CHECK=1` to turn it off.
-A termchat running from a source folder (`npm link`, `npm run dev`) doesn't update itself – use `git pull && npm install`.
-
-Layout:
-
-- `src/core`: networking, crypto, protocol, storage, app state. Runs without a UI.
-- `src/commands`: command parser and registry
-- `src/ui`: Ink interface (screens, components, Markdown renderer, editor)
