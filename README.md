@@ -164,9 +164,9 @@ Everything lives in `~/.termchat/` (readable only by you):
 ```sh
 git clone https://github.com/OWNER/termchat.git
 cd termchat
-npm install        # builds automatically
-npm link           # makes `termchat` point at this folder
+npm install
 npm run dev        # run from source without building
+npm run build      # build dist/ – then `npm link` makes `termchat` point at this folder
 
 npm test           # unit and integration tests (including two real instances over localhost)
 npm run typecheck
@@ -174,7 +174,8 @@ npm run build
 ```
 
 **Releasing:** commit your changes, then run `npm run release` (or `npm run release minor` / `major`).
-It runs the checks, bumps the version in `package.json`, commits, tags and pushes. Everyone gets told about
+It runs the checks, bumps the version in `package.json`, builds `dist/`, commits, tags and pushes.
+`dist/` is committed on purpose: installs from GitHub use it as is, so they don't need any build tools. Everyone gets told about
 the new version the next time they start termchat. Pushing without a release doesn't notify anybody.
 
 The update check reads `package.json` on GitHub; set `TERMCHAT_NO_UPDATE_CHECK=1` to turn it off.

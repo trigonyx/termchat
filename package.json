@@ -23,7 +23,6 @@
   "scripts": {
     "dev": "tsx src/cli.tsx",
     "build": "tsup",
-    "prepare": "tsup",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

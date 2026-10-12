@@ -6,6 +6,7 @@ export default defineConfig({
   target: 'node22',
   platform: 'node',
   clean: true,
-  sourcemap: true,
+  // dist/ is committed (installs from GitHub use it as is) – keep it small
+  sourcemap: false,
   banner: { js: '#!/usr/bin/env node' },
 });
