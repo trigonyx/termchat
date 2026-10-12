@@ -24,14 +24,14 @@ function resolvePaths(home) {
 }
 
 // src/core/update.ts
-import { spawn } from "child_process";
+import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path2 from "path";
 
 // package.json
 var package_default = {
   name: "termchat",
-  version: "1.1.0",
+  version: "1.1.1",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -124,13 +124,13 @@ function installKind(script = process.argv[1] ?? "") {
 }
 var SOURCE_HINT = `This termchat runs from a source folder, so it doesn't update itself.
 Update it there with \`git pull && npm install\`, or install the release with \`${INSTALL_CMD}\`.`;
-function runInstall({ inherit }) {
-  if (!REPO_CONFIGURED) return Promise.resolve({ ok: false, output: "The GitHub repo is not set in package.json yet." });
+var releaseSpec = (version) => `https://github.com/${REPO}/tarball/v${version}`;
+function npmInstall(spec, inherit) {
   return new Promise((resolve) => {
     const win = process.platform === "win32";
     let output = "";
     try {
-      const p = spawn(win ? "npm.cmd" : "npm", ["install", "-g", "--prefer-online", INSTALL_SPEC], {
+      const p = spawn(win ? "npm.cmd" : "npm", ["install", "-g", "--prefer-online", spec], {
         stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
         shell: win
       });
@@ -144,6 +144,23 @@ ${err.message}` }));
     }
   });
 }
+async function runInstall({ inherit, version }) {
+  if (!REPO_CONFIGURED) return { ok: false, output: "The GitHub repo is not set in package.json yet." };
+  if (version) {
+    const res = await npmInstall(releaseSpec(version), inherit);
+    if (res.ok || installHint(res.output)) return res;
+  }
+  return npmInstall(INSTALL_SPEC, inherit);
+}
+function installedVersion(script = process.argv[1] ?? "") {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [script, "--version"], { timeout: 15e3 }, (err, stdout) => {
+      const version = /termchat (\d+\.\d+\.\d+)/.exec(String(stdout))?.[1];
+      resolve(err || !version ? null : version);
+    });
+  });
+}
+var staleInstallHint = (installed) => `npm finished, but termchat ${installed} is still installed. Reinstall it with \`npm uninstall -g termchat\` and then \`${INSTALL_CMD}\`.`;
 function installHint(output) {
   if (/EACCES|permission denied/i.test(output)) {
     return `npm isn't allowed to write to its global folder. Run \`sudo ${INSTALL_CMD}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
@@ -2321,12 +2338,12 @@ var GroupManager = class {
 };
 
 // src/core/notify.ts
-import { execFile } from "child_process";
+import { execFile as execFile2 } from "child_process";
 var MAC_SCRIPT = "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run";
 function notify(title, body) {
   if (process.platform !== "darwin") return;
   try {
-    execFile("osascript", ["-e", MAC_SCRIPT, title, body], () => {
+    execFile2("osascript", ["-e", MAC_SCRIPT, title, body], () => {
     }).on("error", () => {
     });
   } catch {
@@ -3554,7 +3571,7 @@ Reachable at ${addr}`);
       }
       if (!await ctx.ui.confirm(`Update termchat ${VERSION} \u2192 ${latest}?`)) return;
       ctx.ui.print(`Installing termchat ${latest} \u2026 (this can take a minute)`);
-      const res = await runInstall({ inherit: false });
+      const res = await runInstall({ inherit: false, version: latest });
       if (!res.ok) {
         const tail = res.output.trim().split("\n").slice(-6).join("\n");
         const hint = installHint(res.output);
@@ -3563,6 +3580,8 @@ Reachable at ${addr}`);
 ${tail}
 \`\`\``);
       }
+      const installed = await installedVersion();
+      if (installed && compareVersions(installed, latest) < 0) throw new Error(staleInstallHint(installed));
       ctx.store.setUpdateAvailable(null);
       if (await ctx.ui.confirm(`Updated to ${latest}. Restart termchat now?`)) {
         requestRestart();
@@ -5210,10 +5229,17 @@ async function update() {
   process.stdout.write(latest ? `Updating termchat ${VERSION} \u2192 ${latest} \u2026
 ` : `Couldn't check the latest version \u2013 installing anyway \u2026
 `);
-  const res = await runInstall({ inherit: true });
+  const res = await runInstall({ inherit: true, version: latest });
   if (res.ok) {
+    const installed = await installedVersion();
+    if (installed && latest && compareVersions(installed, latest) < 0) {
+      process.stderr.write(`
+${staleInstallHint(installed).replace(/`/g, "")}
+`);
+      return 1;
+    }
     process.stdout.write(`
-Done${latest ? ` \u2013 termchat ${latest} is installed` : ""}. Start it with: termchat
+Done${installed ? ` \u2013 termchat ${installed} is installed` : ""}. Start it with: termchat
 `);
     return 0;
   }
