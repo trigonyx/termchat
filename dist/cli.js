@@ -31,7 +31,7 @@ import path2 from "path";
 // package.json
 var package_default = {
   name: "termchat",
-  version: "1.0.0",
+  version: "1.1.0",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -1617,6 +1617,15 @@ var DISCOVERY_PORT = 5051;
 var ANNOUNCE_INTERVAL = 3e3;
 var EXPIRE_AFTER = 1e4;
 var ID_RE2 = /^[A-Z2-7]{20}$/;
+var IPV4_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+var MAX_PACKET = 2048;
+var HINT_INTERVAL = 15e3;
+var REPROBE_AFTER = 3e4;
+var MAX_GOSSIP = 32;
+var SCAN_BATCH = 5;
+var SCAN_TICK = 50;
+var MIN_SCAN_PREFIX = 16;
+var RESCAN_ALONE = 10 * 6e4;
 function localIPv4s() {
   const out = [];
   for (const addrs of Object.values(os2.networkInterfaces())) {
@@ -1625,64 +1634,216 @@ function localIPv4s() {
       const ip = a.address.split(".").map(Number);
       const mask = a.netmask.split(".").map(Number);
       const broadcast = ip.map((b, i) => (b | ~mask[i] & 255) & 255).join(".");
-      out.push({ address: a.address, broadcast });
+      out.push({ address: a.address, netmask: a.netmask, broadcast });
     }
   }
   return out;
 }
-var Discovery = class extends EventEmitter4 {
-  constructor(myId, getName, getPort, udpPort = DISCOVERY_PORT) {
-    super();
-    this.myId = myId;
-    this.getName = getName;
-    this.getPort = getPort;
-    this.udpPort = udpPort;
+var toInt = (ip) => ip.split(".").reduce((n, b) => n * 256 + Number(b), 0);
+var toIp = (n) => [n >>> 24, n >>> 16 & 255, n >>> 8 & 255, n & 255].join(".");
+function prefixLength(netmask) {
+  let n = toInt(netmask);
+  let bits = 0;
+  while (n & 2147483648) {
+    bits++;
+    n = n << 1 >>> 0;
   }
-  socket = null;
-  timer = null;
-  peers = /* @__PURE__ */ new Map();
-  start() {
+  return bits;
+}
+function isPrivate(ip) {
+  const [a, b] = ip.split(".").map(Number);
+  return a === 10 || a === 172 && b >= 16 && b < 32 || a === 192 && b === 168 || a === 100 && b >= 64 && b < 128;
+}
+function* scanOrder(ifaces) {
+  const ranges = ifaces.flatMap((i) => {
+    const prefix = prefixLength(i.netmask);
+    if (prefix > 30 || i.address.startsWith("169.254.")) return [];
+    const mask = prefix < MIN_SCAN_PREFIX ? 4294901760 : toInt(i.netmask);
+    const ip = toInt(i.address);
+    const net3 = (ip & mask) >>> 0;
+    const broadcast = (net3 | ~mask >>> 0) >>> 0;
+    return [{ ip, net: net3, broadcast }];
+  });
+  const gens = ranges.map(function* ({ ip, net: net3, broadcast }) {
+    for (let d = 1; ip + d < broadcast || ip - d > net3; d++) {
+      if (ip + d < broadcast) yield toIp(ip + d);
+      if (ip - d > net3) yield toIp(ip - d);
+    }
+  });
+  const seen = /* @__PURE__ */ new Set();
+  while (gens.length) {
+    for (let i = 0; i < gens.length; i++) {
+      const r = gens[i].next();
+      if (r.done) gens.splice(i--, 1);
+      else if (!seen.has(r.value)) {
+        seen.add(r.value);
+        yield r.value;
+      }
+    }
+  }
+}
+function udpTransport(port) {
+  return ({ onMessage, onError, onReady }) => {
     const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
-    this.socket = socket;
+    let bound = false;
     socket.on("error", (err) => {
-      this.emit("log", `Discovery unavailable: ${err.message}`);
-      this.stop();
+      if (!bound) onError(err);
     });
-    socket.on("message", (buf, rinfo) => this.onMessage(buf, rinfo.address));
-    socket.bind(this.udpPort, () => {
+    socket.on("message", (buf, rinfo) => onMessage(buf, rinfo.address));
+    socket.bind(port, () => {
+      bound = true;
       try {
         socket.setBroadcast(true);
       } catch {
       }
-      this.announce(true);
-      this.timer = setInterval(() => {
-        this.announce(false);
-        this.expire();
-      }, ANNOUNCE_INTERVAL);
-      this.timer.unref();
+      onReady();
+    });
+    return {
+      send(buf, address) {
+        try {
+          socket.send(buf, port, address, () => {
+          });
+        } catch {
+        }
+      },
+      close() {
+        try {
+          socket.close();
+        } catch {
+        }
+      }
+    };
+  };
+}
+var Discovery = class extends EventEmitter4 {
+  constructor(myId, getName, getPort, opts = {}) {
+    super();
+    this.myId = myId;
+    this.getName = getName;
+    this.getPort = getPort;
+    this.opts = opts;
+  }
+  transport = null;
+  timer = null;
+  scanTimer = null;
+  scanQueue = null;
+  lastScanEnd = 0;
+  lastHints = 0;
+  netSignature = "";
+  /** address → when we last asked it directly */
+  probed = /* @__PURE__ */ new Map();
+  peers = /* @__PURE__ */ new Map();
+  /** True while the own subnet is being scanned. */
+  get scanning() {
+    return this.scanQueue !== null;
+  }
+  start() {
+    const open = this.opts.transport ?? udpTransport(this.opts.udpPort ?? DISCOVERY_PORT);
+    this.transport = open({
+      onMessage: (buf, address) => this.onMessage(buf, address),
+      onError: (err) => {
+        this.emit("log", `Discovery unavailable: ${err.message}`);
+        this.stop();
+      },
+      onReady: () => {
+        this.netSignature = this.signature();
+        this.announce(true);
+        this.probeHints();
+        this.startScan();
+        this.timer = setInterval(() => this.tick(), ANNOUNCE_INTERVAL);
+        this.timer.unref();
+      }
     });
   }
   /** Re-announce immediately, e.g. after a name change. */
   announce(query) {
-    const msg = { app: "termchat", v: 1, id: this.myId, name: this.getName(), port: this.getPort() };
-    if (query) msg.q = 1;
-    const targets = /* @__PURE__ */ new Set(["255.255.255.255", ...localIPv4s().map((i) => i.broadcast)]);
+    const msg = this.message(query);
+    const targets = /* @__PURE__ */ new Set(["255.255.255.255", ...this.interfaces().map((i) => i.broadcast)]);
+    for (const p of this.peers.values()) targets.add(p.ip);
     for (const target of targets) this.sendTo(msg, target);
   }
+  tick() {
+    const now = Date.now();
+    const signature = this.signature();
+    if (signature !== this.netSignature) {
+      this.netSignature = signature;
+      this.emit("log", "Network changed \u2013 searching again");
+      this.probed.clear();
+      this.announce(true);
+      this.probeHints();
+      this.startScan();
+    } else {
+      this.announce(false);
+      if (now - this.lastHints >= HINT_INTERVAL) this.probeHints();
+      if (!this.scanQueue && this.peers.size === 0 && now - this.lastScanEnd >= RESCAN_ALONE) this.startScan();
+    }
+    for (const [ip, at] of this.probed) if (now - at >= REPROBE_AFTER) this.probed.delete(ip);
+    this.expire();
+  }
+  message(query) {
+    const msg = { app: "termchat", v: 1, id: this.myId, name: this.getName(), port: this.getPort() };
+    if (query) msg.q = 1;
+    const ips = [...new Set([...this.peers.values()].map((p) => p.ip))].slice(0, MAX_GOSSIP);
+    if (ips.length) msg.ips = ips;
+    return msg;
+  }
   sendTo(msg, address) {
-    const buf = Buffer.from(JSON.stringify(msg));
-    this.socket?.send(buf, this.udpPort, address, () => {
-    });
+    this.transport?.send(Buffer.from(JSON.stringify(msg)), address);
+  }
+  interfaces() {
+    return this.opts.interfaces?.() ?? localIPv4s();
+  }
+  signature() {
+    return this.interfaces().map((i) => `${i.address}/${i.netmask}`).sort().join(",");
+  }
+  /** Asks one address directly whether termchat runs there (at most every 30 s). */
+  probe(ip) {
+    if (!IPV4_RE.test(ip) || this.interfaces().some((i) => i.address === ip)) return;
+    for (const p of this.peers.values()) if (p.ip === ip) return;
+    const last = this.probed.get(ip);
+    if (last !== void 0 && Date.now() - last < REPROBE_AFTER) return;
+    this.probed.set(ip, Date.now());
+    this.sendTo(this.message(true), ip);
+  }
+  probeHints() {
+    this.lastHints = Date.now();
+    for (const ip of this.opts.hints?.() ?? []) this.probe(ip);
+  }
+  startScan() {
+    this.scanQueue = scanOrder(this.interfaces());
+    if (!this.scanTimer) {
+      this.scanTimer = setInterval(() => this.scanStep(), SCAN_TICK);
+      this.scanTimer.unref();
+    }
+    this.emit("change");
+  }
+  scanStep() {
+    const known = new Set([...this.peers.values()].map((p) => p.ip));
+    const msg = this.message(true);
+    for (let sent = 0; sent < SCAN_BATCH; ) {
+      const next = this.scanQueue?.next();
+      if (!next || next.done) {
+        this.scanQueue = null;
+        this.lastScanEnd = Date.now();
+        if (this.scanTimer) clearInterval(this.scanTimer);
+        this.scanTimer = null;
+        this.emit("change");
+        return;
+      }
+      if (known.has(next.value)) continue;
+      this.sendTo(msg, next.value);
+      sent++;
+    }
   }
   onMessage(buf, address) {
-    if (buf.length > 1024) return;
+    if (buf.length > MAX_PACKET) return;
     let msg;
     try {
       msg = JSON.parse(buf.toString("utf8"));
     } catch {
       return;
     }
-    if (msg.app !== "termchat" || msg.v !== 1 || typeof msg.id !== "string" || !ID_RE2.test(msg.id)) return;
+    if (!msg || msg.app !== "termchat" || msg.v !== 1 || typeof msg.id !== "string" || !ID_RE2.test(msg.id)) return;
     if (msg.id === this.myId) return;
     const port = Number(msg.port);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) return;
@@ -1690,9 +1851,13 @@ var Discovery = class extends EventEmitter4 {
     const peer = { id: msg.id, name: cleanName(msg.name), ip: address, port, lastSeen: Date.now() };
     this.peers.set(msg.id, peer);
     if (!prev || prev.ip !== peer.ip || prev.port !== peer.port || prev.name !== peer.name) this.emit("change");
-    if (msg.q) {
-      const reply = { app: "termchat", v: 1, id: this.myId, name: this.getName(), port: this.getPort() };
-      this.sendTo(reply, address);
+    if (msg.q) this.sendTo(this.message(false), address);
+    if (Array.isArray(msg.ips)) {
+      const subnets = this.interfaces().map((i) => ({ net: toInt(i.address) & toInt(i.netmask), mask: toInt(i.netmask) }));
+      const nearby = (ip) => isPrivate(ip) || subnets.some((s) => (toInt(ip) & s.mask) === s.net);
+      for (const ip of msg.ips.slice(0, MAX_GOSSIP)) {
+        if (typeof ip === "string" && IPV4_RE.test(ip) && nearby(ip)) this.probe(ip);
+      }
     }
   }
   expire() {
@@ -1708,12 +1873,12 @@ var Discovery = class extends EventEmitter4 {
   }
   stop() {
     if (this.timer) clearInterval(this.timer);
+    if (this.scanTimer) clearInterval(this.scanTimer);
     this.timer = null;
-    try {
-      this.socket?.close();
-    } catch {
-    }
-    this.socket = null;
+    this.scanTimer = null;
+    this.scanQueue = null;
+    this.transport?.close();
+    this.transport = null;
   }
 };
 
@@ -2259,14 +2424,16 @@ var AppStore = class {
   async start() {
     await this.network.start(this.preferredPort);
     if (this.opts.discovery !== false) {
-      this.discovery = new Discovery(
-        this.identity.id,
-        () => this.name,
-        () => this.network.port,
-        this.opts.discoveryPort
-      );
+      this.discovery = new Discovery(this.identity.id, () => this.name, () => this.network.port, {
+        ...this.opts.discoveryOptions,
+        udpPort: this.opts.discoveryPort,
+        hints: () => this.lastKnownIps()
+      });
       this.discovery.on("change", () => {
         for (const p of this.discovery?.peers.values() ?? []) {
+          const c2 = this.contacts.get(p.id);
+          if (c2 && (c2.lastIp !== p.ip || c2.lastPort !== p.port)) this.contacts.upsert(p.id, { lastIp: p.ip, lastPort: p.port });
+          if (this.peerBook.get(p.id)) this.peerBook.update(p.id, { lastIp: p.ip, lastPort: p.port });
           const ds = this.dialStates.get(p.id);
           if (ds && !ds.inFlight) ds.next = 0;
         }
@@ -2308,7 +2475,8 @@ var AppStore = class {
       name: this.name,
       port: this.network.port,
       ips: localIPv4s().map((i) => i.address),
-      discovery: this.discovery !== null
+      discovery: this.discovery !== null,
+      scanning: this.discovery?.scanning ?? false
     };
   }
   isOnline(id) {
@@ -2873,6 +3041,16 @@ var AppStore = class {
     const known = this.peerBook.get(id);
     if (known?.lastIp && known.lastPort) return { ip: known.lastIp, port: known.lastPort, discovered: false };
     return null;
+  }
+  /** Where contacts and group members were last seen – discovery asks there directly. */
+  lastKnownIps() {
+    const ips = /* @__PURE__ */ new Set();
+    for (const c2 of this.contacts.all()) if (c2.lastIp && c2.state !== "blocked") ips.add(c2.lastIp);
+    for (const id of this.groups.peers()) {
+      const ip = this.peerBook.get(id)?.lastIp;
+      if (ip) ips.add(ip);
+    }
+    return [...ips];
   }
   dialLoop() {
     for (const c2 of this.contacts.all()) {
@@ -4615,15 +4793,16 @@ function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect
   const bottom = dialog ? dialogHeight(dialog) : commandMode ? inputBoxHeight(editor, width) + menuHeight(cmd.items.length) : 0;
   const bodyHeight = Math.max(3, height - bottom - 1);
   const lines = [];
-  const section = (title, list) => {
-    if (!list.length) return;
+  const section = (title, list, showEmpty = false) => {
+    if (!list.length && !showEmpty) return;
     if (lines.length) lines.push({ kind: "gap" });
     lines.push({ kind: "section", title });
     for (const e of list) lines.push({ kind: "entry", entry: e, index: entries.indexOf(e) });
   };
   section(`Requests \xB7 ${data.requests.length}`, entries.filter((e) => e.type === "request"));
   section("Chats", entries.filter((e) => e.type === "chat"));
-  section("Nearby", entries.filter((e) => e.type === "nearby"));
+  const scanning = store.me.scanning;
+  section(scanning ? "Nearby \xB7 searching the network \u2026" : "Nearby", entries.filter((e) => e.type === "nearby"), scanning);
   const selLine = lines.findIndex((l) => l.kind === "entry" && l.index === selected);
   const start = Math.max(0, Math.min(selLine - Math.floor(bodyHeight / 2), lines.length - bodyHeight));
   const visible = lines.slice(start, start + bodyHeight);
@@ -4704,6 +4883,7 @@ function EmptyState({ store }) {
     /* @__PURE__ */ jsx9(Text9, { children: " " }),
     /* @__PURE__ */ jsx9(Text9, { color: theme.dim, children: "Other termchat users on the same network show up here automatically" }),
     /* @__PURE__ */ jsx9(Text9, { color: theme.dim, children: 'under "Nearby". Press enter to send them a chat request.' }),
+    me.scanning ? /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: "Searching the network \u2026" }) : null,
     /* @__PURE__ */ jsxs9(Text9, { color: theme.dim, children: [
       "Once you have contacts, press ",
       /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: "g" }),
