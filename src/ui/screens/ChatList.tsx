@@ -218,15 +218,16 @@ export function ChatList({ store, width, height, actions, dialog, selectedKey, o
   const bodyHeight = Math.max(3, height - bottom - 1);
 
   const lines: Line[] = [];
-  const section = (title: string, list: Entry[]) => {
-    if (!list.length) return;
+  const section = (title: string, list: Entry[], showEmpty = false) => {
+    if (!list.length && !showEmpty) return;
     if (lines.length) lines.push({ kind: 'gap' });
     lines.push({ kind: 'section', title });
     for (const e of list) lines.push({ kind: 'entry', entry: e, index: entries.indexOf(e) });
   };
   section(`Requests · ${data.requests.length}`, entries.filter((e) => e.type === 'request'));
   section('Chats', entries.filter((e) => e.type === 'chat'));
-  section('Nearby', entries.filter((e) => e.type === 'nearby'));
+  const scanning = store.me.scanning;
+  section(scanning ? 'Nearby · searching the network …' : 'Nearby', entries.filter((e) => e.type === 'nearby'), scanning);
 
   const selLine = lines.findIndex((l) => l.kind === 'entry' && l.index === selected);
   const start = Math.max(0, Math.min(selLine - Math.floor(bodyHeight / 2), lines.length - bodyHeight));
@@ -371,6 +372,7 @@ function EmptyState({ store }: { store: AppStore }) {
       <Text> </Text>
       <Text color={theme.dim}>Other termchat users on the same network show up here automatically</Text>
       <Text color={theme.dim}>under "Nearby". Press enter to send them a chat request.</Text>
+      {me.scanning ? <Text color={theme.accent}>Searching the network …</Text> : null}
       <Text color={theme.dim}>
         Once you have contacts, press <Text color={theme.accent}>g</Text> to start a group chat.
       </Text>

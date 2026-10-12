@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { ContactBook, displayName, type Contact } from './contacts.js';
-import { Discovery, localIPv4s, type DiscoveredPeer } from './discovery.js';
+import { Discovery, localIPv4s, type DiscoveredPeer, type DiscoveryOptions } from './discovery.js';
 import { HistoryStore, type ChatMessage } from './history.js';
 import { loadConfig, loadOrCreateIdentity, safetyCode, saveConfig, type Identity } from './identity.js';
 import type { GroupEvent, GroupState } from './groupEvents.js';
@@ -19,6 +19,8 @@ export interface StoreOptions {
   port?: number;
   discovery?: boolean;
   discoveryPort?: number;
+  /** Simulated network for discovery (tests). */
+  discoveryOptions?: Pick<DiscoveryOptions, 'transport' | 'interfaces'>;
   dialIntervalMs?: number;
   debug?: boolean;
   /** Desktop notification sink (defaults to the OS notifier). */
@@ -185,15 +187,18 @@ export class AppStore {
   async start(): Promise<void> {
     await this.network.start(this.preferredPort);
     if (this.opts.discovery !== false) {
-      this.discovery = new Discovery(
-        this.identity.id,
-        () => this.name,
-        () => this.network.port,
-        this.opts.discoveryPort,
-      );
+      this.discovery = new Discovery(this.identity.id, () => this.name, () => this.network.port, {
+        ...this.opts.discoveryOptions,
+        udpPort: this.opts.discoveryPort,
+        hints: () => this.lastKnownIps(),
+      });
       this.discovery.on('change', () => {
-        // a contact's address changed → retry right away
         for (const p of this.discovery?.peers.values() ?? []) {
+          // Recognized by ID: if a contact's address changed, remember the new one …
+          const c = this.contacts.get(p.id);
+          if (c && (c.lastIp !== p.ip || c.lastPort !== p.port)) this.contacts.upsert(p.id, { lastIp: p.ip, lastPort: p.port });
+          if (this.peerBook.get(p.id)) this.peerBook.update(p.id, { lastIp: p.ip, lastPort: p.port });
+          // … and retry right away
           const ds = this.dialStates.get(p.id);
           if (ds && !ds.inFlight) ds.next = 0;
         }
@@ -243,6 +248,7 @@ export class AppStore {
       port: this.network.port,
       ips: localIPv4s().map((i) => i.address),
       discovery: this.discovery !== null,
+      scanning: this.discovery?.scanning ?? false,
     };
   }
 
@@ -903,6 +909,17 @@ export class AppStore {
     const known = this.peerBook.get(id);
     if (known?.lastIp && known.lastPort) return { ip: known.lastIp, port: known.lastPort, discovered: false };
     return null;
+  }
+
+  /** Where contacts and group members were last seen – discovery asks there directly. */
+  private lastKnownIps(): string[] {
+    const ips = new Set<string>();
+    for (const c of this.contacts.all()) if (c.lastIp && c.state !== 'blocked') ips.add(c.lastIp);
+    for (const id of this.groups.peers()) {
+      const ip = this.peerBook.get(id)?.lastIp;
+      if (ip) ips.add(ip);
+    }
+    return [...ips];
   }
 
   private dialLoop(): void {
