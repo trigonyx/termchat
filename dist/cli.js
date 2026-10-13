@@ -31,7 +31,7 @@ import path2 from "path";
 // package.json
 var package_default = {
   name: "termchat",
-  version: "1.1.2",
+  version: "1.2.0",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -3678,7 +3678,11 @@ function Header({ store, width }) {
     /* @__PURE__ */ jsxs(Box, { paddingX: 1, width, children: [
       /* @__PURE__ */ jsx(Box, { flexGrow: 1, flexShrink: 1, minWidth: 0, children: /* @__PURE__ */ jsxs(Text, { wrap: "truncate-end", children: [
         /* @__PURE__ */ jsx(Text, { backgroundColor: theme.accent, color: "#1E1E1E", bold: true, children: " termchat " }),
-        /* @__PURE__ */ jsx(Text, { children: " " }),
+        /* @__PURE__ */ jsxs(Text, { color: theme.faint, children: [
+          " v",
+          VERSION
+        ] }),
+        /* @__PURE__ */ jsx(Text, { children: "  " }),
         /* @__PURE__ */ jsx(Text, { bold: true, children: me.name }),
         wide ? /* @__PURE__ */ jsxs(Fragment, { children: [
           /* @__PURE__ */ jsx(Text, { color: theme.faint, children: " \xB7 " }),
