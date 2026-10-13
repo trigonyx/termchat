@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { INSTALL_CMD, INSTALL_SPEC, REPO, REPO_CONFIGURED, VERSION } from './version.js';
 
@@ -58,12 +59,86 @@ export const SOURCE_HINT = `This termchat runs from a source folder, so it doesn
  */
 export const releaseSpec = (version: string) => `https://github.com/${REPO}/tarball/v${version}`;
 
-function npmInstall(spec: string, inherit: boolean): Promise<{ ok: boolean; output: string }> {
+/**
+ * Own install folder for updates when the global npm folder belongs to root (Node from the
+ * nodejs.org installer). The global `termchat` starts the copy in here if it's newer.
+ */
+export const appDir = () => process.env.TERMCHAT_APP_DIR || path.join(os.homedir(), '.termchat', 'app');
+
+/** What gets installed; TERMCHAT_INSTALL_SPEC overrides it (testing). */
+const installSpec = (version?: string | null) =>
+  process.env.TERMCHAT_INSTALL_SPEC || (version ? releaseSpec(version) : INSTALL_SPEC);
+
+const isRoot = () => process.getuid?.() === 0;
+
+/** termchat's copy in appDir(), if there is a complete one. */
+export function localInstall(dir = appDir()): { version: string; cli: string } | null {
+  const root = path.join(dir, 'node_modules', 'termchat');
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown };
+    const cli = path.join(root, 'dist', 'cli.js');
+    if (pkg?.name !== 'termchat' || typeof pkg.version !== 'string' || !VERSION_RE.test(pkg.version)) return null;
+    return fs.existsSync(cli) ? { version: pkg.version, cli } : null;
+  } catch {
+    return null;
+  }
+}
+
+const realpath = (p: string) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+};
+
+/** The newer copy in appDir() that should run instead of `self` (this cli.js), if any. */
+export function newerLocalInstall(self: string, ownVersion = VERSION): { version: string; cli: string } | null {
+  const local = localInstall();
+  if (!local || compareVersions(local.version, ownVersion) <= 0) return null;
+  return realpath(local.cli) === realpath(self) ? null : local;
+}
+
+/** The `node_modules` folder the running termchat was installed into (null for a source folder). */
+function installedInto(script: string): string | null {
+  let dir = path.dirname(realpath(script));
+  while (path.dirname(dir) !== dir) {
+    if (path.basename(dir) === 'termchat' && path.basename(path.dirname(dir)) === 'node_modules') return path.dirname(dir);
+    dir = path.dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * Where an update goes: npm's global folder if we may write there (nvm, Homebrew, Windows),
+ * otherwise appDir() – so updates never need sudo.
+ */
+export function installTarget(script = process.argv[1] ?? '', root = isRoot()): 'global' | 'local' {
+  const modules = installedInto(script);
+  if (!modules) return 'global';
+  if (realpath(modules).startsWith(realpath(appDir()) + path.sep)) return 'local';
+  if (root) return 'global'; // never leave root-owned files in the user's appDir()
+  try {
+    fs.accessSync(modules, fs.constants.W_OK);
+    return 'global';
+  } catch {
+    return 'local';
+  }
+}
+
+function npmInstall(spec: string, inherit: boolean, target: 'global' | 'local'): Promise<{ ok: boolean; output: string }> {
+  const dir = appDir();
+  const args =
+    target === 'global'
+      ? ['install', '-g', '--prefer-online', spec]
+      : // own cache: after `sudo npm ...`, ~/.npm often contains root-owned files
+        ['install', '--prefix', dir, '--cache', path.join(dir, '.npm-cache'), '--prefer-online', '--no-audit', '--no-fund', spec];
   return new Promise((resolve) => {
     const win = process.platform === 'win32';
     let output = '';
     try {
-      const p = spawn(win ? 'npm.cmd' : 'npm', ['install', '-g', '--prefer-online', spec], {
+      if (target === 'local') fs.mkdirSync(dir, { recursive: true });
+      const p = spawn(win ? 'npm.cmd' : 'npm', args, {
         stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
         shell: win,
       });
@@ -77,19 +152,28 @@ function npmInstall(spec: string, inherit: boolean): Promise<{ ok: boolean; outp
   });
 }
 
+const PERMISSION_RE = /EACCES|EPERM|permission denied/i;
+
 /**
  * Installs `version` (or main, if it's unknown) with npm, always fetching the tarball
- * instead of using npm's cached copy. `inherit` shows npm's output in the terminal,
- * otherwise it's captured.
+ * instead of using npm's cached copy – into the global folder or, if that belongs to
+ * root, into appDir(). `inherit` shows npm's output in the terminal, otherwise it's captured.
  */
 export async function runInstall({ inherit, version }: { inherit: boolean; version?: string | null }): Promise<{ ok: boolean; output: string }> {
-  if (!REPO_CONFIGURED) return { ok: false, output: 'The GitHub repo is not set in package.json yet.' };
-  if (version) {
-    const res = await npmInstall(releaseSpec(version), inherit);
-    // no tag for this version (pushed without tags?) – fall back to main
-    if (res.ok || installHint(res.output)) return res;
-  }
-  return npmInstall(INSTALL_SPEC, inherit);
+  if (!REPO_CONFIGURED && !process.env.TERMCHAT_INSTALL_SPEC) return { ok: false, output: 'The GitHub repo is not set in package.json yet.' };
+  const attempt = async (target: 'global' | 'local') => {
+    if (version && !process.env.TERMCHAT_INSTALL_SPEC) {
+      const res = await npmInstall(installSpec(version), inherit, target);
+      // no tag for this version (pushed without tags?) – fall back to main
+      if (res.ok || PERMISSION_RE.test(res.output)) return res;
+    }
+    return npmInstall(installSpec(), inherit, target);
+  };
+  const target = installTarget();
+  const res = await attempt(target);
+  // the global folder looked writable but wasn't after all
+  if (!res.ok && target === 'global' && !isRoot() && PERMISSION_RE.test(res.output)) return attempt('local');
+  return res;
 }
 
 /** The version a restart would run, asked from the installed termchat itself (null if unknown). */
@@ -104,12 +188,12 @@ export function installedVersion(script = process.argv[1] ?? ''): Promise<string
 
 /** Shown when npm succeeded but the old version is still installed. */
 export const staleInstallHint = (installed: string) =>
-  `npm finished, but termchat ${installed} is still installed. Reinstall it with \`npm uninstall -g termchat\` and then \`${INSTALL_CMD}\`.`;
+  `npm finished, but termchat ${installed} is still the version that starts. Try \`termchat update\` again in a few minutes – GitHub can take a moment after a release.`;
 
 /** A hint for the most common install failure. */
 export function installHint(output: string): string | null {
-  if (/EACCES|permission denied/i.test(output)) {
-    return `npm isn't allowed to write to its global folder. Run \`sudo ${INSTALL_CMD}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
+  if (PERMISSION_RE.test(output)) {
+    return `npm isn't allowed to write to ${appDir()}. That folder should belong to you – fix it with \`sudo chown -R "$(whoami)" ~/.termchat\`, then run /update again.`;
   }
   return null;
 }

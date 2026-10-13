@@ -36,7 +36,12 @@ termchat checks for a new version every time it starts. If there is one, the hea
 
 Your profile, contacts and chats live in `~/.termchat` and are kept across updates.
 
-If npm says `EACCES` (no permission to install globally), either use `sudo npm i -g https://github.com/trigonyx/termchat/tarball/main`
+Updates never need `sudo`. If Node came from the nodejs.org installer, npm's global folder belongs to root, so
+`/update` and `termchat update` install the new version into `~/.termchat/app` instead, and the `termchat`
+command always starts the newest version it finds. (Coming from 1.2.0 or older with such a setup? Run
+`sudo termchat update` one last time; the old version can't do it without.)
+
+Only the first install may need `sudo` on such a setup: if npm says `EACCES`, use `sudo npm i -g https://github.com/trigonyx/termchat/tarball/main`,
 or install Node via a version manager such as [nvm](https://github.com/nvm-sh/nvm), [fnm](https://github.com/Schniz/fnm) or Homebrew.
 
 ## How it works

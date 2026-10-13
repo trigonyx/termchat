@@ -1,5 +1,6 @@
 import { render } from 'ink';
 import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { resolvePaths } from './core/paths.js';
 import {
@@ -8,6 +9,7 @@ import {
   installedVersion,
   installHint,
   installKind,
+  newerLocalInstall,
   restartRequested,
   runInstall,
   SOURCE_HINT,
@@ -157,4 +159,21 @@ function main(): void {
   );
 }
 
-main();
+/**
+ * Updates without write access to npm's global folder land in ~/.termchat/app. If a newer
+ * copy is there, it runs instead of this one (with the same arguments).
+ */
+async function start(): Promise<void> {
+  const local = installKind() === 'npm' ? newerLocalInstall(fileURLToPath(import.meta.url)) : null;
+  if (local) {
+    try {
+      await import(pathToFileURL(local.cli).href);
+      return;
+    } catch (err) {
+      process.stderr.write(`Couldn't start termchat ${local.version} (${(err as Error).message}) – starting ${VERSION} instead.\n`);
+    }
+  }
+  main();
+}
+
+void start();
