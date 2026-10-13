@@ -1,6 +1,11 @@
+import { render } from 'ink-testing-library';
+import { createElement } from 'react';
 import { describe, expect, it } from 'vitest';
 import { parseAddress, registry } from '../src/commands/builtin.js';
 import { parseCommand, tokenize } from '../src/commands/parse.js';
+import type { AppStore } from '../src/core/store.js';
+import { VERSION } from '../src/core/version.js';
+import { Header } from '../src/ui/components/Header.js';
 import { cleanPaste, edit, layoutEditor } from '../src/ui/editor.js';
 import { plainPreview, renderMarkdown } from '../src/ui/markdown.js';
 
@@ -73,5 +78,20 @@ describe('markdown', () => {
 
   it('preview without Markdown characters', () => {
     expect(plainPreview('**Hello** [Link](http://x)\n# Title')).toBe('Hello Link Title');
+  });
+});
+
+describe('header', () => {
+  it('shows the app version next to the logo, also in narrow terminals', () => {
+    const store = {
+      me: { id: 'ABCDEFGHIJKLMNOPQRST', name: 'Max', ips: ['10.0.0.2'], port: 5050, discovery: true, scanning: false },
+      onlineCount: () => 0,
+      updateAvailable: null,
+    } as unknown as AppStore;
+    for (const width of [100, 40]) {
+      const { lastFrame, unmount } = render(createElement(Header, { store, width }));
+      expect(strip(lastFrame() ?? '')).toContain(`termchat  v${VERSION}`);
+      unmount();
+    }
   });
 });

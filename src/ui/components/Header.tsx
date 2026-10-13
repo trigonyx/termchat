@@ -1,9 +1,10 @@
 import { Box, Text } from 'ink';
 import { formatId } from '../../core/identity.js';
 import type { AppStore } from '../../core/store.js';
+import { VERSION } from '../../core/version.js';
 import { icons, theme } from '../theme.js';
 
-/** Header: logo on the left, own identity and network status on the right. */
+/** Header: logo and version on the left, own identity and network status on the right. */
 export function Header({ store, width }: { store: AppStore; width: number }) {
   const me = store.me;
   const online = store.onlineCount();
@@ -17,7 +18,8 @@ export function Header({ store, width }: { store: AppStore; width: number }) {
             <Text backgroundColor={theme.accent} color="#1E1E1E" bold>
               {' termchat '}
             </Text>
-            <Text> </Text>
+            <Text color={theme.faint}> v{VERSION}</Text>
+            <Text>  </Text>
             <Text bold>{me.name}</Text>
             {wide ? (
               <>
