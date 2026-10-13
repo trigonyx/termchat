@@ -148,6 +148,9 @@ export const builtinCommands: Command[] = [
         return;
       }
       const c = contactOf(ctx);
+      if (c.state === 'outgoing') {
+        throw new Error("You already sent a request – you're connected as soon as it reaches them and they accept");
+      }
       if (c.state !== 'incoming') throw new Error('There is no pending request');
       ctx.store.accept(c.id);
     },

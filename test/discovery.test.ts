@@ -17,6 +17,7 @@ class FakeLan {
   broadcast = false;
   readonly nodes: Node[] = [];
   readonly sentTo = new Set<string>();
+  readonly packets: { to: string; msg: Record<string, unknown> }[] = [];
 
   join(ip: string, netmask = '255.255.255.0'): { node: Node; transport: OpenTransport; interfaces: () => LocalIPv4[] } {
     const node: Node = { ip, netmask };
@@ -41,6 +42,7 @@ class FakeLan {
 
   send(from: Node, buf: Buffer, address: string): void {
     this.sentTo.add(address);
+    this.packets.push({ to: address, msg: JSON.parse(buf.toString('utf8')) });
     const isBroadcast = address === '255.255.255.255' || address.endsWith('.255');
     const targets = isBroadcast
       ? this.broadcast
@@ -82,9 +84,9 @@ describe('Discovery without broadcasts', () => {
     vi.useRealTimers();
   });
 
-  function start(lan: FakeLan, id: string, ip: string, netmask?: string, hints: string[] = []) {
+  function start(lan: FakeLan, id: string, ip: string, netmask?: string, hints: string[] = [], wants?: (id: string) => boolean) {
     const { node, transport, interfaces } = lan.join(ip, netmask);
-    const d = new Discovery(id, () => `n-${id[0]}`, () => 5050, { transport, interfaces, hints: () => hints });
+    const d = new Discovery(id, () => `n-${id[0]}`, () => 5050, { transport, interfaces, hints: () => hints, wants });
     d.start();
     running.push(d);
     return { d, node };
@@ -139,6 +141,26 @@ describe('Discovery without broadcasts', () => {
     expect(a.d.peers.get(ids[1]!)?.ip).toBe('10.2.0.9');
   });
 
+  it('asks wanted peers to connect back – directly, never by broadcast', async () => {
+    const lan = new FakeLan();
+    lan.broadcast = true;
+    const a = start(lan, ids[0]!, '10.0.0.10', undefined, [], (id) => id === ids[1]);
+    const b = start(lan, ids[1]!, '10.0.0.20');
+    start(lan, ids[2]!, '10.0.0.30');
+    const callbacks: string[] = [];
+    b.d.on('callback', (id) => callbacks.push(id));
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(callbacks).toContain(ids[0]);
+    const asks = lan.packets.filter((p) => p.msg.c === 1);
+    expect(asks.length).toBeGreaterThan(0);
+    expect(asks.every((p) => p.to === '10.0.0.20' && p.msg.id === ids[0])).toBe(true);
+
+    callbacks.length = 0;
+    a.d.callMe(ids[1]!);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(callbacks).toEqual([ids[0]]);
+  });
+
   it('does not probe public addresses it was told about', async () => {
     const lan = new FakeLan();
     lan.broadcast = true;
@@ -181,6 +203,57 @@ describe('AppStore with discovery', () => {
       await new Promise((r) => setTimeout(r, 20));
     }
   }
+
+  it('delivers a request even if the requested side blocks incoming connections', { timeout: 20_000 }, async () => {
+    const lan = new FakeLan();
+    lan.broadcast = true;
+    const a = await boot(profile('Alice'), lan, '127.0.0.1');
+    // Bob's address can't be reached over TCP (TEST-NET), like a firewall dropping connections
+    const b = await boot(profile('Bob'), lan, '192.0.2.1');
+    const bobId = b.identity.id;
+    const aliceId = a.identity.id;
+    await until(() => a.chatList().nearby.some((p) => p.id === bobId) && b.chatList().nearby.some((p) => p.id === aliceId));
+
+    const sent = Date.now();
+    a.requestNearby(bobId);
+    // Bob connects back to Alice, so her request shows up right away
+    await until(() => b.chatList().requests.some((r) => r.id === aliceId), 3000);
+    expect(Date.now() - sent).toBeLessThan(3000);
+    expect(b.chatList().nearby.some((p) => p.id === aliceId)).toBe(false);
+
+    b.accept(aliceId);
+    await until(() => a.contact(bobId)?.state === 'accepted' && b.contact(aliceId)?.state === 'accepted');
+    expect(a.isOnline(bobId) && b.isOnline(aliceId)).toBe(true);
+  });
+
+  it('connects two people who request each other at the same time', { timeout: 20_000 }, async () => {
+    const lan = new FakeLan();
+    lan.broadcast = true;
+    const a = await boot(profile('Alice'), lan, '127.0.0.1');
+    const b = await boot(profile('Bob'), lan, '127.0.0.1');
+    await until(() => a.chatList().nearby.length === 1 && b.chatList().nearby.length === 1);
+
+    a.requestNearby(b.identity.id);
+    b.requestNearby(a.identity.id);
+    await until(() => a.contact(b.identity.id)?.state === 'accepted' && b.contact(a.identity.id)?.state === 'accepted');
+    expect(a.chatList().requests).toHaveLength(0);
+    expect(b.chatList().requests).toHaveLength(0);
+  });
+
+  it('accepts when you request someone who already requested you', { timeout: 20_000 }, async () => {
+    const lan = new FakeLan();
+    lan.broadcast = true;
+    const a = await boot(profile('Alice'), lan, '127.0.0.1');
+    const b = await boot(profile('Bob'), lan, '127.0.0.1');
+    await until(() => a.chatList().nearby.length === 1 && b.chatList().nearby.length === 1);
+
+    a.requestNearby(b.identity.id);
+    await until(() => b.contact(a.identity.id)?.state === 'incoming');
+    // e.g. Bob pressed enter on Alice under Nearby just as her request arrived
+    b.requestNearby(a.identity.id);
+    expect(b.contact(a.identity.id)?.state).toBe('accepted');
+    await until(() => a.contact(b.identity.id)?.state === 'accepted');
+  });
 
   it('shows others under Nearby and reconnects a contact whose address changed', { timeout: 20_000 }, async () => {
     const lan = new FakeLan();

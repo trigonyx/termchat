@@ -112,10 +112,17 @@ interface DialState {
   next: number;
   backoff: number;
   deferredSince?: number;
+  failures?: number;
 }
 
 const TOAST_MS = 4000;
 const MAX_BACKOFF = 30_000;
+/** Peers that discovery currently sees are evidently online – retry them sooner. */
+const MAX_BACKOFF_NEARBY = 5000;
+/** A peer's "please connect to me" stays valid this long. */
+const CALLBACK_TTL = 15_000;
+/** Limits how many strangers can make us connect to them. */
+const MAX_CALLBACKS_PER_MINUTE = 10;
 /** Unknown connections that don't introduce themselves are dropped after this time. */
 const UNKNOWN_PEER_TIMEOUT = 15_000;
 
@@ -136,6 +143,11 @@ export class AppStore {
   private notes = new Map<string, Note[]>();
   private viewCutoffs = new Map<string, number>();
   private dialStates = new Map<string, DialState>();
+  /** Peers that asked us to connect to them (id → when). */
+  private callbacks = new Map<string, number>();
+  private callbackTimes: number[] = [];
+  /** Contacts we already told that they can't be reached. */
+  private reachWarned = new Set<string>();
   private dialTimer: NodeJS.Timeout | null = null;
   private toastTimer: NodeJS.Timeout | null = null;
   private listeners = new Set<() => void>();
@@ -191,6 +203,7 @@ export class AppStore {
         ...this.opts.discoveryOptions,
         udpPort: this.opts.discoveryPort,
         hints: () => this.lastKnownIps(),
+        wants: (id) => this.wantsConnection(id),
       });
       this.discovery.on('change', () => {
         for (const p of this.discovery?.peers.values() ?? []) {
@@ -205,6 +218,7 @@ export class AppStore {
         this.changed();
       });
       this.discovery.on('log', (l) => this.log(l));
+      this.discovery.on('callback', (id) => this.onCallback(id));
       this.discovery.start();
     }
     this.dialTimer = setInterval(() => this.dialLoop(), this.opts.dialIntervalMs ?? 1500);
@@ -517,13 +531,16 @@ export class AppStore {
     const p = this.discovery?.peers.get(id);
     const existing = this.contacts.get(id);
     if (existing) {
-      if (existing.state === 'declined' || existing.state === 'blocked') this.setState(id, 'outgoing');
+      // they asked us first (maybe at the same moment) → that's a yes from both sides
+      if (existing.state === 'incoming') this.accept(id);
+      else if (existing.state === 'declined' || existing.state === 'blocked') this.setState(id, 'outgoing');
+      this.connect(id);
       return;
     }
     if (!p) throw new Error('Peer is no longer nearby');
     this.contacts.upsert(id, { publicKey: '', name: p.name, state: 'outgoing', lastIp: p.ip, lastPort: p.port });
     this.note(id, 'Sending request …');
-    this.tryDial(id);
+    this.connect(id);
     this.changed();
   }
 
@@ -531,7 +548,7 @@ export class AppStore {
   request(id: string): void {
     this.setState(id, 'outgoing');
     this.note(id, 'Request sent again');
-    this.tryDial(id);
+    this.connect(id);
   }
 
   /** Add a contact by IP – for networks that block broadcast. */
@@ -546,7 +563,7 @@ export class AppStore {
     this.setState(id, 'accepted');
     this.note(id, `You accepted ${displayName(c)}'s request`, 'success');
     this.flushOutbox(id);
-    this.tryDial(id);
+    this.connect(id);
   }
 
   decline(id: string): void {
@@ -574,7 +591,7 @@ export class AppStore {
     if (c?.state !== 'blocked') return;
     this.setState(id, 'outgoing');
     this.note(id, 'Unblocked – request sent', 'success');
-    this.tryDial(id);
+    this.connect(id);
   }
 
   /** Remove contact + history. */
@@ -743,6 +760,8 @@ export class AppStore {
       return;
     }
     this.dialStates.delete(id);
+    this.callbacks.delete(id);
+    this.reachWarned.delete(id);
 
     if (s.tag === 'request') {
       // user explicitly ran /add
@@ -927,24 +946,56 @@ export class AppStore {
       if (c.state === 'accepted' || c.state === 'outgoing') this.tryDial(c.id);
     }
     for (const id of this.groups.peers()) this.tryDial(id);
+    const now = Date.now();
+    for (const [id, at] of this.callbacks) {
+      if (now - at >= CALLBACK_TTL) this.callbacks.delete(id);
+      else this.tryDial(id);
+    }
+  }
+
+  /** Dials, and asks the peer to dial us too – whichever direction the firewalls allow wins. */
+  private connect(id: string): void {
+    this.tryDial(id);
+    this.discovery?.callMe(id);
+  }
+
+  private wantsConnection(id: string): boolean {
+    if (this.network.isOnline(id)) return false;
+    const state = this.contacts.get(id)?.state;
+    return state === 'accepted' || state === 'outgoing' || (state !== 'blocked' && this.groups.sharesGroup(id));
+  }
+
+  /** A peer asked us to connect to them, e.g. because they sent us a request but can't reach us. */
+  private onCallback(id: string): void {
+    if (this.network.isOnline(id) || this.contacts.get(id)?.state === 'blocked') return;
+    const now = Date.now();
+    if (!this.callbacks.has(id)) {
+      this.callbackTimes = this.callbackTimes.filter((t) => now - t < 60_000);
+      if (this.callbackTimes.length >= MAX_CALLBACKS_PER_MINUTE) return;
+      this.callbackTimes.push(now);
+    }
+    this.callbacks.set(id, now);
+    this.tryDial(id);
   }
 
   private tryDial(id: string): void {
     if (this.network.isOnline(id)) return;
     const c = this.contacts.get(id);
+    const now = Date.now();
     const wanted = c?.state === 'accepted' || c?.state === 'outgoing';
-    if (!wanted && (c?.state === 'blocked' || !this.groups.sharesGroup(id))) return;
+    // they asked us to connect (a request on its way, or their firewall blocks us)
+    const calledBack = c?.state !== 'blocked' && now - (this.callbacks.get(id) ?? -Infinity) < CALLBACK_TTL;
+    if (!wanted && !calledBack && (c?.state === 'blocked' || !this.groups.sharesGroup(id))) return;
     const t = this.target(id);
     if (!t) return;
 
-    const now = Date.now();
     const ds = this.dialStates.get(id) ?? { inFlight: false, next: 0, backoff: 1000 };
     this.dialStates.set(id, ds);
     if (ds.inFlight || now < ds.next) return;
 
     // If both see each other via discovery, only the smaller ID dials right away – this
     // avoids duplicate connections. The larger one steps in if nothing happened after 4 s.
-    if (t.discovered && c?.state !== 'outgoing' && this.identity.id > id) {
+    if (t.discovered && !calledBack && c?.state !== 'outgoing' && this.identity.id > id) {
       ds.deferredSince ??= now;
       if (now - ds.deferredSince < 4000) return;
     }
@@ -957,8 +1008,21 @@ export class AppStore {
       })
       .catch((err: Error) => {
         this.log(`Connection to ${id} (${t.ip}:${t.port}) failed: ${err.message}`);
-        ds.backoff = Math.min(ds.backoff * 2, MAX_BACKOFF);
+        ds.backoff = Math.min(ds.backoff * 2, t.discovered ? MAX_BACKOFF_NEARBY : MAX_BACKOFF);
         ds.next = Date.now() + ds.backoff;
+        ds.failures = (ds.failures ?? 0) + 1;
+        const contact = this.contacts.get(id);
+        const waiting = contact?.state === 'outgoing' || contact?.state === 'accepted';
+        if (waiting && t.discovered && ds.failures >= 3 && !this.network.isOnline(id) && !this.reachWarned.has(id)) {
+          this.reachWarned.add(id);
+          this.note(
+            id,
+            `Can't reach ${md(displayName(contact))} at ${t.ip}:${t.port} yet (${md(err.message)}) – still trying. ` +
+              'If this stays, a firewall is probably blocking termchat on one of your computers: ' +
+              'on Windows, allow Node.js for public networks; on macOS, allow incoming connections for node.',
+            'error',
+          );
+        }
       })
       .finally(() => {
         ds.inFlight = false;

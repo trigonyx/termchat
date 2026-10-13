@@ -41,6 +41,12 @@ interface Announce {
   q?: 1;
   /** Addresses of other termchat instances the sender sees, so they can be asked directly. */
   ips?: string[];
+  /**
+   * "Please connect to me": the sender wants a connection but can't open one itself,
+   * e.g. because the receiver's firewall blocks incoming connections. Only ever sent
+   * directly to that one peer, never broadcast.
+   */
+  c?: 1;
 }
 
 export interface LocalIPv4 {
@@ -172,6 +178,8 @@ export interface DiscoveryOptions {
   udpPort?: number;
   /** Addresses worth asking directly, e.g. where contacts were last seen. */
   hints?: () => Iterable<string>;
+  /** Peers we want to be connected to but aren't – they're asked to connect to us. */
+  wants?: (id: string) => boolean;
   /** Own network interfaces (default: the OS's). */
   interfaces?: () => LocalIPv4[];
   /** Replaces the UDP socket (tests). */
@@ -188,8 +196,11 @@ export interface DiscoveryOptions {
  *  - asks the addresses where contacts were last seen,
  *  - keeps found peers alive with direct (unicast) announcements, and
  *  - passes on the addresses it knows, so one found peer leads to all the others.
+ *
+ * It also asks peers we want to reach to connect to us (`callback`), so a connection
+ * comes about as long as at least one side accepts incoming connections.
  */
-export class Discovery extends EventEmitter<{ change: []; log: [string] }> {
+export class Discovery extends EventEmitter<{ change: []; log: [string]; callback: [string] }> {
   private transport: DiscoveryTransport | null = null;
   private timer: NodeJS.Timeout | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
@@ -237,10 +248,17 @@ export class Discovery extends EventEmitter<{ change: []; log: [string] }> {
   /** Re-announce immediately, e.g. after a name change. */
   announce(query: boolean): void {
     const msg = this.message(query);
-    const targets = new Set(['255.255.255.255', ...this.interfaces().map((i) => i.broadcast)]);
+    for (const target of new Set(['255.255.255.255', ...this.interfaces().map((i) => i.broadcast)])) this.sendTo(msg, target);
     // directly as well, in case broadcasts are filtered
-    for (const p of this.peers.values()) targets.add(p.ip);
-    for (const target of targets) this.sendTo(msg, target);
+    for (const p of this.peers.values()) {
+      this.sendTo(this.opts.wants?.(p.id) ? { ...msg, c: 1 } : msg, p.ip);
+    }
+  }
+
+  /** Asks a peer right away to connect to us (e.g. after sending them a request). */
+  callMe(id: string): void {
+    const p = this.peers.get(id);
+    if (p) this.sendTo({ ...this.message(false), c: 1 }, p.ip);
   }
 
   private tick(): void {
@@ -348,6 +366,7 @@ export class Discovery extends EventEmitter<{ change: []; log: [string] }> {
     if (!prev || prev.ip !== peer.ip || prev.port !== peer.port || prev.name !== peer.name) this.emit('change');
 
     if (msg.q) this.sendTo(this.message(false), address);
+    if (msg.c === 1) this.emit('callback', msg.id);
 
     // Others' addresses are only asked, never trusted: a peer shows up once it answers itself.
     if (Array.isArray(msg.ips)) {
