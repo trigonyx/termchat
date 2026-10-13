@@ -3,6 +3,7 @@
 // src/cli.tsx
 import { render } from "ink";
 import { spawn as spawn3 } from "child_process";
+import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 
 // src/core/paths.ts
@@ -26,12 +27,13 @@ function resolvePaths(home) {
 // src/core/update.ts
 import { execFile, spawn } from "child_process";
 import fs from "fs";
+import os2 from "os";
 import path2 from "path";
 
 // package.json
 var package_default = {
   name: "termchat",
-  version: "1.2.0",
+  version: "1.3.0",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -125,12 +127,64 @@ function installKind(script = process.argv[1] ?? "") {
 var SOURCE_HINT = `This termchat runs from a source folder, so it doesn't update itself.
 Update it there with \`git pull && npm install\`, or install the release with \`${INSTALL_CMD}\`.`;
 var releaseSpec = (version) => `https://github.com/${REPO}/tarball/v${version}`;
-function npmInstall(spec, inherit) {
+var appDir = () => process.env.TERMCHAT_APP_DIR || path2.join(os2.homedir(), ".termchat", "app");
+var installSpec = (version) => process.env.TERMCHAT_INSTALL_SPEC || (version ? releaseSpec(version) : INSTALL_SPEC);
+var isRoot = () => process.getuid?.() === 0;
+function localInstall(dir = appDir()) {
+  const root = path2.join(dir, "node_modules", "termchat");
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path2.join(root, "package.json"), "utf8"));
+    const cli = path2.join(root, "dist", "cli.js");
+    if (pkg?.name !== "termchat" || typeof pkg.version !== "string" || !VERSION_RE.test(pkg.version)) return null;
+    return fs.existsSync(cli) ? { version: pkg.version, cli } : null;
+  } catch {
+    return null;
+  }
+}
+var realpath = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path2.resolve(p);
+  }
+};
+function newerLocalInstall(self, ownVersion = VERSION) {
+  const local = localInstall();
+  if (!local || compareVersions(local.version, ownVersion) <= 0) return null;
+  return realpath(local.cli) === realpath(self) ? null : local;
+}
+function installedInto(script) {
+  let dir = path2.dirname(realpath(script));
+  while (path2.dirname(dir) !== dir) {
+    if (path2.basename(dir) === "termchat" && path2.basename(path2.dirname(dir)) === "node_modules") return path2.dirname(dir);
+    dir = path2.dirname(dir);
+  }
+  return null;
+}
+function installTarget(script = process.argv[1] ?? "", root = isRoot()) {
+  const modules = installedInto(script);
+  if (!modules) return "global";
+  if (realpath(modules).startsWith(realpath(appDir()) + path2.sep)) return "local";
+  if (root) return "global";
+  try {
+    fs.accessSync(modules, fs.constants.W_OK);
+    return "global";
+  } catch {
+    return "local";
+  }
+}
+function npmInstall(spec, inherit, target) {
+  const dir = appDir();
+  const args = target === "global" ? ["install", "-g", "--prefer-online", spec] : (
+    // own cache: after `sudo npm ...`, ~/.npm often contains root-owned files
+    ["install", "--prefix", dir, "--cache", path2.join(dir, ".npm-cache"), "--prefer-online", "--no-audit", "--no-fund", spec]
+  );
   return new Promise((resolve) => {
     const win = process.platform === "win32";
     let output = "";
     try {
-      const p = spawn(win ? "npm.cmd" : "npm", ["install", "-g", "--prefer-online", spec], {
+      if (target === "local") fs.mkdirSync(dir, { recursive: true });
+      const p = spawn(win ? "npm.cmd" : "npm", args, {
         stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
         shell: win
       });
@@ -144,13 +198,20 @@ ${err.message}` }));
     }
   });
 }
+var PERMISSION_RE = /EACCES|EPERM|permission denied/i;
 async function runInstall({ inherit, version }) {
-  if (!REPO_CONFIGURED) return { ok: false, output: "The GitHub repo is not set in package.json yet." };
-  if (version) {
-    const res = await npmInstall(releaseSpec(version), inherit);
-    if (res.ok || installHint(res.output)) return res;
-  }
-  return npmInstall(INSTALL_SPEC, inherit);
+  if (!REPO_CONFIGURED && !process.env.TERMCHAT_INSTALL_SPEC) return { ok: false, output: "The GitHub repo is not set in package.json yet." };
+  const attempt = async (target2) => {
+    if (version && !process.env.TERMCHAT_INSTALL_SPEC) {
+      const res2 = await npmInstall(installSpec(version), inherit, target2);
+      if (res2.ok || PERMISSION_RE.test(res2.output)) return res2;
+    }
+    return npmInstall(installSpec(), inherit, target2);
+  };
+  const target = installTarget();
+  const res = await attempt(target);
+  if (!res.ok && target === "global" && !isRoot() && PERMISSION_RE.test(res.output)) return attempt("local");
+  return res;
 }
 function installedVersion(script = process.argv[1] ?? "") {
   return new Promise((resolve) => {
@@ -160,10 +221,10 @@ function installedVersion(script = process.argv[1] ?? "") {
     });
   });
 }
-var staleInstallHint = (installed) => `npm finished, but termchat ${installed} is still installed. Reinstall it with \`npm uninstall -g termchat\` and then \`${INSTALL_CMD}\`.`;
+var staleInstallHint = (installed) => `npm finished, but termchat ${installed} is still the version that starts. Try \`termchat update\` again in a few minutes \u2013 GitHub can take a moment after a release.`;
 function installHint(output) {
-  if (/EACCES|permission denied/i.test(output)) {
-    return `npm isn't allowed to write to its global folder. Run \`sudo ${INSTALL_CMD}\` in a terminal, or install Node via nvm/fnm/Homebrew so no sudo is needed.`;
+  if (PERMISSION_RE.test(output)) {
+    return `npm isn't allowed to write to ${appDir()}. That folder should belong to you \u2013 fix it with \`sudo chown -R "$(whoami)" ~/.termchat\`, then run /update again.`;
   }
   return null;
 }
@@ -1525,9 +1586,9 @@ function blocks(tokens, width) {
       }
       case "list": {
         const list = t;
-        const start = typeof list.start === "number" ? list.start : 1;
+        const start2 = typeof list.start === "number" ? list.start : 1;
         list.items.forEach((item, i) => {
-          let bullet = list.ordered ? `${start + i}.` : "\u2022";
+          let bullet = list.ordered ? `${start2 + i}.` : "\u2022";
           if (item.task) bullet = item.checked ? c.success("\u2611") : "\u2610";
           const bw = stringWidth2(bullet) + 1;
           const body = blocks(item.tokens.filter((x) => x.type !== "checkbox"), width - bw);
@@ -1628,7 +1689,7 @@ var ContactBook = class {
 
 // src/core/discovery.ts
 import dgram from "dgram";
-import os2 from "os";
+import os3 from "os";
 import { EventEmitter as EventEmitter4 } from "events";
 var DISCOVERY_PORT = 5051;
 var ANNOUNCE_INTERVAL = 3e3;
@@ -1645,7 +1706,7 @@ var MIN_SCAN_PREFIX = 16;
 var RESCAN_ALONE = 10 * 6e4;
 function localIPv4s() {
   const out = [];
-  for (const addrs of Object.values(os2.networkInterfaces())) {
+  for (const addrs of Object.values(os3.networkInterfaces())) {
     for (const a of addrs ?? []) {
       if (a.family !== "IPv4" || a.internal) continue;
       const ip = a.address.split(".").map(Number);
@@ -2554,7 +2615,8 @@ var AppStore = class {
       creator: state.creator,
       myStatus,
       members,
-      onlineCount: members.filter((m) => m.online && !m.isMe && m.status === "member").length,
+      onlineCount: members.filter((m) => m.online && !m.inactive && !m.isMe && m.status === "member").length,
+      inactiveCount: members.filter((m) => m.online && m.inactive && !m.isMe && m.status === "member").length,
       invitedBy: state.members.get(this.identity.id)?.invitedBy,
       unread: meta.unread,
       lastActivity: meta.lastActivity,
@@ -2577,9 +2639,13 @@ var AppStore = class {
     const known = new Set(contacts.map((v) => v.id));
     const isRequest = (e) => e.kind === "direct" ? e.state === "incoming" : e.myStatus === "invited";
     const rank = (e) => e.kind === "direct" && e.state === "blocked" ? 1 : 0;
+    const rest = all.filter((e) => !isRequest(e));
+    const isUnread = (e) => e.unread > 0;
     return {
       requests: all.filter(isRequest),
-      chats: all.filter((e) => !isRequest(e)).sort((a, b) => rank(a) - rank(b)),
+      unread: rest.filter(isUnread),
+      chats: rest.filter((e) => e.kind === "direct" && !isUnread(e)).sort((a, b) => rank(a) - rank(b)),
+      groups: rest.filter((e) => e.kind === "group" && !isUnread(e)),
       nearby: [...this.discovery?.peers.values() ?? []].filter((p) => !known.has(p.id)).sort((a, b) => a.name.localeCompare(b.name))
     };
   }
@@ -3795,12 +3861,12 @@ var edit = {
   end: (s) => ({ ...s, cursor: lineEnd(s.value, s.cursor) }),
   /** One line up/down; `null` if already on the first/last line. */
   vertical(s, dir) {
-    const start = lineStart(s.value, s.cursor);
-    const col = s.cursor - start;
+    const start2 = lineStart(s.value, s.cursor);
+    const col = s.cursor - start2;
     if (dir === -1) {
-      if (start === 0) return null;
-      const prevStart = lineStart(s.value, start - 1);
-      return { ...s, cursor: Math.min(prevStart + col, start - 1) };
+      if (start2 === 0) return null;
+      const prevStart = lineStart(s.value, start2 - 1);
+      return { ...s, cursor: Math.min(prevStart + col, start2 - 1) };
     }
     const end = lineEnd(s.value, s.cursor);
     if (end === s.value.length) return null;
@@ -3989,11 +4055,11 @@ function menuHeight(count) {
 }
 function CommandMenu({ items, selected, width }) {
   if (!items.length) return null;
-  const start = Math.max(0, Math.min(selected - MENU_MAX + 1, items.length - MENU_MAX));
-  const visible = items.slice(start, start + MENU_MAX);
+  const start2 = Math.max(0, Math.min(selected - MENU_MAX + 1, items.length - MENU_MAX));
+  const visible = items.slice(start2, start2 + MENU_MAX);
   const nameWidth = Math.min(34, Math.max(...items.map((it) => it.label.length)) + 2);
   return /* @__PURE__ */ jsx3(Box3, { flexDirection: "column", width, paddingX: 2, children: visible.map((item, i) => {
-    const active = start + i === selected;
+    const active = start2 + i === selected;
     return /* @__PURE__ */ jsxs3(Box3, { children: [
       /* @__PURE__ */ jsx3(Box3, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx3(Text3, { color: active ? theme.accent : void 0, bold: active, wrap: "truncate-end", children: item.label }) }),
       /* @__PURE__ */ jsx3(Text3, { color: active ? void 0 : theme.dim, wrap: "truncate-end", children: item.description })
@@ -4135,11 +4201,11 @@ function InputBox({
   const cw = contentWidth(width);
   const lines = layoutEditor(state, cw);
   const cursorLine = Math.max(0, lines.findIndex((l) => l.cursor !== null));
-  const start = Math.max(0, Math.min(cursorLine - maxLines + 1, lines.length - maxLines));
-  const visible = lines.slice(start, start + maxLines);
+  const start2 = Math.max(0, Math.min(cursorLine - maxLines + 1, lines.length - maxLines));
+  const visible = lines.slice(start2, start2 + maxLines);
   const empty = state.value.length === 0;
   return /* @__PURE__ */ jsx4(Box4, { borderStyle: "round", borderColor, paddingX: 1, width, flexDirection: "column", flexShrink: 0, children: visible.map((line, i) => {
-    const prompt = start + i === 0 ? `${icons.pointer} ` : "  ";
+    const prompt = start2 + i === 0 ? `${icons.pointer} ` : "  ";
     if (empty && i === 0) {
       return /* @__PURE__ */ jsxs4(Text4, { wrap: "truncate-end", children: [
         /* @__PURE__ */ jsx4(Text4, { color: theme.accent, children: prompt }),
@@ -4251,8 +4317,8 @@ function PickDialog({ spec, width }) {
       spec.resolve(chosen.size ? spec.options.filter((o) => chosen.has(o.id)).map((o) => o.id) : current ? [current.id] : []);
     }
   });
-  const start = Math.max(0, Math.min(cursor - PICK_VISIBLE + 1, n - PICK_VISIBLE));
-  const visible = spec.options.slice(start, start + PICK_VISIBLE);
+  const start2 = Math.max(0, Math.min(cursor - PICK_VISIBLE + 1, n - PICK_VISIBLE));
+  const visible = spec.options.slice(start2, start2 + PICK_VISIBLE);
   return /* @__PURE__ */ jsxs5(Frame, { width, children: [
     /* @__PURE__ */ jsxs5(Text5, { bold: true, wrap: "truncate-end", children: [
       spec.title,
@@ -4263,7 +4329,7 @@ function PickDialog({ spec, width }) {
       ] }) : null
     ] }),
     visible.map((o, i) => {
-      const active = start + i === cursor;
+      const active = start2 + i === cursor;
       const box = spec.multi ? chosen.has(o.id) ? "[x] " : "[ ] " : "";
       return /* @__PURE__ */ jsxs5(Text5, { wrap: "truncate-end", children: [
         /* @__PURE__ */ jsx5(Text5, { color: theme.accent, children: active ? `${icons.pointer} ` : "  " }),
@@ -4448,8 +4514,8 @@ function MessageList({
 }) {
   const h = Math.max(1, height);
   const end = Math.max(0, lines.length - offset);
-  const start = Math.max(0, end - h);
-  const visible = lines.slice(start, end);
+  const start2 = Math.max(0, end - h);
+  const visible = lines.slice(start2, end);
   const indicator = offset > 0;
   if (indicator) visible[visible.length - 1] = c.dim(`  \u2193 ${offset} newer lines`);
   const padding = Math.max(0, h - visible.length);
@@ -4572,6 +4638,11 @@ function Header2({ chat, width }) {
         /* @__PURE__ */ jsxs8(Text8, { color: chat.onlineCount ? theme.success : theme.dim, children: [
           chat.onlineCount,
           " online"
+        ] }),
+        /* @__PURE__ */ jsx8(Text8, { color: theme.faint, children: " \xB7 " }),
+        /* @__PURE__ */ jsxs8(Text8, { color: chat.inactiveCount ? theme.warning : theme.dim, children: [
+          chat.inactiveCount,
+          " inactive"
         ] })
       ] }) : null
     ] });
@@ -4748,11 +4819,15 @@ function previewOf(c2, store) {
 }
 function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect, history }) {
   const data = store.chatList();
-  const entries = [
-    ...data.requests.map((c2) => ({ type: "request", key: `c:${c2.id}`, chat: c2 })),
-    ...data.chats.map((c2) => ({ type: "chat", key: `c:${c2.id}`, chat: c2 })),
-    ...data.nearby.map((p) => ({ type: "nearby", key: `n:${p.id}`, peer: p }))
-  ];
+  const chatEntry = (type) => (c2) => ({ type, key: `c:${c2.id}`, chat: c2 });
+  const sections = {
+    requests: data.requests.map(chatEntry("request")),
+    unread: data.unread.map(chatEntry("chat")),
+    chats: data.chats.map(chatEntry("chat")),
+    groups: data.groups.map(chatEntry("chat")),
+    nearby: data.nearby.map((p) => ({ type: "nearby", key: `n:${p.id}`, peer: p }))
+  };
+  const entries = Object.values(sections).flat();
   let selected = entries.findIndex((e) => e.key === selectedKey);
   if (selected === -1) selected = 0;
   const current = entries[selected];
@@ -4885,13 +4960,15 @@ function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect
     lines.push({ kind: "section", title });
     for (const e of list) lines.push({ kind: "entry", entry: e, index: entries.indexOf(e) });
   };
-  section(`Requests \xB7 ${data.requests.length}`, entries.filter((e) => e.type === "request"));
-  section("Chats", entries.filter((e) => e.type === "chat"));
+  section(`Requests \xB7 ${data.requests.length}`, sections.requests);
+  section(`Unread \xB7 ${data.unread.length}`, sections.unread);
+  section("Chats", sections.chats);
+  section("Groups", sections.groups);
   const scanning = store.me.scanning;
-  section(scanning ? "Nearby \xB7 searching the network \u2026" : "Nearby", entries.filter((e) => e.type === "nearby"), scanning);
+  section(scanning ? "Nearby \xB7 searching the network \u2026" : "Nearby", sections.nearby, scanning);
   const selLine = lines.findIndex((l) => l.kind === "entry" && l.index === selected);
-  const start = Math.max(0, Math.min(selLine - Math.floor(bodyHeight / 2), lines.length - bodyHeight));
-  const visible = lines.slice(start, start + bodyHeight);
+  const start2 = Math.max(0, Math.min(selLine - Math.floor(bodyHeight / 2), lines.length - bodyHeight));
+  const visible = lines.slice(start2, start2 + bodyHeight);
   const hints = (() => {
     if (!current) return ["a add by IP", "g new group", "/ commands", "? help", "q quit"];
     const base = ["\u2191\u2193 select"];
@@ -5209,7 +5286,7 @@ function Main({ store, width, height, quit }) {
   }, [store, openChat, goHome, quit]);
   const cycle = (dir) => {
     const data = store.chatList();
-    const ids = [...data.requests, ...data.chats].map((c2) => c2.id);
+    const ids = [...data.requests, ...data.unread, ...data.chats, ...data.groups].map((c2) => c2.id);
     if (!ids.length || !chatId) return;
     const i = ids.indexOf(chatId);
     openChat(ids[(i + dir + ids.length) % ids.length]);
@@ -5405,4 +5482,17 @@ termchat crashed: ${err instanceof Error ? err.stack ?? err.message : String(err
     crash
   );
 }
-main();
+async function start() {
+  const local = installKind() === "npm" ? newerLocalInstall(fileURLToPath(import.meta.url)) : null;
+  if (local) {
+    try {
+      await import(pathToFileURL(local.cli).href);
+      return;
+    } catch (err) {
+      process.stderr.write(`Couldn't start termchat ${local.version} (${err.message}) \u2013 starting ${VERSION} instead.
+`);
+    }
+  }
+  main();
+}
+void start();
