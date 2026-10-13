@@ -33,7 +33,7 @@ import path2 from "path";
 // package.json
 var package_default = {
   name: "termchat",
-  version: "1.3.0",
+  version: "1.3.1",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
