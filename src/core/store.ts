@@ -70,7 +70,10 @@ export interface GroupView {
   creator: string;
   myStatus: MyGroupStatus;
   members: GroupMemberView[];
+  /** other members online with termchat in front */
   onlineCount: number;
+  /** other members online, but with termchat in the background */
+  inactiveCount: number;
   invitedBy?: string;
   unread: number;
   lastActivity: number;
@@ -81,7 +84,11 @@ export type ChatEntry = ContactView | GroupView;
 
 export interface ChatListData {
   requests: ChatEntry[];
+  /** chats and groups with unread messages (not repeated below) */
+  unread: ChatEntry[];
+  /** 1:1 chats */
   chats: ChatEntry[];
+  groups: ChatEntry[];
   nearby: DiscoveredPeer[];
 }
 
@@ -310,7 +317,8 @@ export class AppStore {
       creator: state.creator,
       myStatus,
       members,
-      onlineCount: members.filter((m) => m.online && !m.isMe && m.status === 'member').length,
+      onlineCount: members.filter((m) => m.online && !m.inactive && !m.isMe && m.status === 'member').length,
+      inactiveCount: members.filter((m) => m.online && m.inactive && !m.isMe && m.status === 'member').length,
       invitedBy: state.members.get(this.identity.id)?.invitedBy,
       unread: meta.unread,
       lastActivity: meta.lastActivity,
@@ -341,9 +349,13 @@ export class AppStore {
     const known = new Set(contacts.map((v) => v.id));
     const isRequest = (e: ChatEntry) => (e.kind === 'direct' ? e.state === 'incoming' : e.myStatus === 'invited');
     const rank = (e: ChatEntry) => (e.kind === 'direct' && e.state === 'blocked' ? 1 : 0);
+    const rest = all.filter((e) => !isRequest(e));
+    const isUnread = (e: ChatEntry) => e.unread > 0;
     return {
       requests: all.filter(isRequest),
-      chats: all.filter((e) => !isRequest(e)).sort((a, b) => rank(a) - rank(b)),
+      unread: rest.filter(isUnread),
+      chats: rest.filter((e) => e.kind === 'direct' && !isUnread(e)).sort((a, b) => rank(a) - rank(b)),
+      groups: rest.filter((e) => e.kind === 'group' && !isUnread(e)),
       nearby: [...(this.discovery?.peers.values() ?? [])]
         .filter((p) => !known.has(p.id))
         .sort((a, b) => a.name.localeCompare(b.name)),

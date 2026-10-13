@@ -159,4 +159,40 @@ describe('group chats', { timeout: 30_000 }, () => {
       expect.arrayContaining([expect.stringContaining('renamed the group'), expect.stringContaining('removed'), expect.stringContaining('left')]),
     );
   });
+
+  it('sorts the list into unread, 1:1 chats and groups, and counts inactive members separately', async () => {
+    const a = await boot(profile('Alice'));
+    const b = await boot(profile('Bob'));
+    const c = await boot(profile('Carl'));
+    await befriend(a, b);
+    await befriend(a, c);
+    const chat = a.createGroup('Weekend', [b.identity.id, c.identity.id]);
+    await until(() => b.chatList().requests.some((r) => r.id === chat) && c.chatList().requests.some((r) => r.id === chat));
+    b.groupAccept(chat);
+    c.groupAccept(chat);
+    await until(() => a.group(chat)?.members.filter((m) => m.status === 'member').length === 3);
+
+    const ids = (list: { id: string }[]) => list.map((e) => e.id).sort();
+    let list = a.chatList();
+    expect(list.unread).toHaveLength(0);
+    expect(ids(list.chats)).toEqual(ids([{ id: b.identity.id }, { id: c.identity.id }]));
+    expect(ids(list.groups)).toEqual([chat]);
+
+    // a message from Bob moves his chat up into "unread" – and only there
+    b.sendMessage(a.identity.id, 'hey');
+    await until(() => a.chatList().unread.length === 1);
+    list = a.chatList();
+    expect(ids(list.unread)).toEqual([b.identity.id]);
+    expect(ids(list.chats)).toEqual([c.identity.id]);
+    a.setActiveChat(b.identity.id);
+    await until(() => a.chatList().unread.length === 0);
+    expect(ids(a.chatList().chats)).toHaveLength(2);
+
+    // Carl puts termchat in the background: still online, but inactive
+    await until(() => a.group(chat)?.onlineCount === 2);
+    expect(a.group(chat)?.inactiveCount).toBe(0);
+    c.setFocused(false);
+    await until(() => a.group(chat)?.inactiveCount === 1);
+    expect(a.group(chat)?.onlineCount).toBe(1);
+  });
 });

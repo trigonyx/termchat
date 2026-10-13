@@ -60,11 +60,16 @@ function previewOf(c: ChatEntry, store: AppStore): { text: string; dim: boolean 
 
 export function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect, history }: Props) {
   const data = store.chatList();
-  const entries: Entry[] = [
-    ...data.requests.map((c): Entry => ({ type: 'request', key: `c:${c.id}`, chat: c })),
-    ...data.chats.map((c): Entry => ({ type: 'chat', key: `c:${c.id}`, chat: c })),
-    ...data.nearby.map((p): Entry => ({ type: 'nearby', key: `n:${p.id}`, peer: p })),
-  ];
+  const chatEntry = (type: 'request' | 'chat') => (c: ChatEntry): Entry => ({ type, key: `c:${c.id}`, chat: c });
+  const sections = {
+    requests: data.requests.map(chatEntry('request')),
+    unread: data.unread.map(chatEntry('chat')),
+    chats: data.chats.map(chatEntry('chat')),
+    groups: data.groups.map(chatEntry('chat')),
+    nearby: data.nearby.map((p): Entry => ({ type: 'nearby', key: `n:${p.id}`, peer: p })),
+  };
+  // top to bottom, in the order of the sections below
+  const entries: Entry[] = Object.values(sections).flat();
   let selected = entries.findIndex((e) => e.key === selectedKey);
   if (selected === -1) selected = 0;
   const current = entries[selected];
@@ -224,10 +229,12 @@ export function ChatList({ store, width, height, actions, dialog, selectedKey, o
     lines.push({ kind: 'section', title });
     for (const e of list) lines.push({ kind: 'entry', entry: e, index: entries.indexOf(e) });
   };
-  section(`Requests · ${data.requests.length}`, entries.filter((e) => e.type === 'request'));
-  section('Chats', entries.filter((e) => e.type === 'chat'));
+  section(`Requests · ${data.requests.length}`, sections.requests);
+  section(`Unread · ${data.unread.length}`, sections.unread);
+  section('Chats', sections.chats);
+  section('Groups', sections.groups);
   const scanning = store.me.scanning;
-  section(scanning ? 'Nearby · searching the network …' : 'Nearby', entries.filter((e) => e.type === 'nearby'), scanning);
+  section(scanning ? 'Nearby · searching the network …' : 'Nearby', sections.nearby, scanning);
 
   const selLine = lines.findIndex((l) => l.kind === 'entry' && l.index === selected);
   const start = Math.max(0, Math.min(selLine - Math.floor(bodyHeight / 2), lines.length - bodyHeight));

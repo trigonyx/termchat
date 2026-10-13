@@ -183,7 +183,7 @@ function Main({ store, width, height, quit }: { store: AppStore; width: number; 
 
   const cycle = (dir: 1 | -1) => {
     const data = store.chatList();
-    const ids = [...data.requests, ...data.chats].map((c) => c.id);
+    const ids = [...data.requests, ...data.unread, ...data.chats, ...data.groups].map((c) => c.id);
     if (!ids.length || !chatId) return;
     const i = ids.indexOf(chatId);
     openChat(ids[(i + dir + ids.length) % ids.length]!);

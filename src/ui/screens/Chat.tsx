@@ -77,6 +77,8 @@ function Header({ chat, width }: { chat: ChatEntry; width: number }) {
           <>
             <Text color={theme.faint}> · </Text>
             <Text color={chat.onlineCount ? theme.success : theme.dim}>{chat.onlineCount} online</Text>
+            <Text color={theme.faint}> · </Text>
+            <Text color={chat.inactiveCount ? theme.warning : theme.dim}>{chat.inactiveCount} inactive</Text>
           </>
         ) : null}
       </>
