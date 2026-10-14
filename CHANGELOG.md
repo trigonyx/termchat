@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.0 – 2026-10-14
+
+- Shared core termcore and one profile for termchat, keyrace and termdrop
+- Contacts' status in front of the chat preview
+
 ## 1.4.0 – 2026-10-14
 
 - Logo banner on the chat list, one termchat per data folder
