@@ -14,7 +14,7 @@ import { shortTime } from 'termcore/ui/format';
 import { plainPreview } from '../markdown.js';
 import { useWheel } from 'termcore/ui/mouse';
 import { icons, theme, personHex } from 'termcore/ui/theme';
-import { presenceDot } from 'termcore/ui/presence';
+import { presenceDot, statusText } from 'termcore/ui/presence';
 import { useCommandInput } from './useCommandInput.js';
 
 type Entry =
@@ -349,6 +349,8 @@ function Row({ entry, selected, width, store }: { entry: Entry; selected: boolea
     </Box>
   );
   const time = c.last ? shortTime(c.last.ts) : '';
+  // their status (busy, do not disturb, a message) in front of the preview, while they're online
+  const status = c.kind === 'direct' && c.state === 'accepted' && c.online ? statusText(c.status, c.statusMsg) : '';
   // a contact's own color (their profile color, else one from their id)
   const nameColor = selected ? theme.accent : !isGroup && c.state === 'accepted' ? personHex(c.id, c.color) : undefined;
   return (
@@ -361,8 +363,16 @@ function Row({ entry, selected, width, store }: { entry: Entry; selected: boolea
         </Text>
       </Box>
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
-        <Text color={preview.dim ? theme.dim : undefined} italic={inactive && !isRequest} wrap="truncate-end">
-          {preview.text}
+        <Text wrap="truncate-end">
+          {status ? (
+            <>
+              <Text color={presenceDot({ online: true, status: c.kind === 'direct' ? c.status : undefined }).color}>{status}</Text>
+              <Text color={theme.faint}> · </Text>
+            </>
+          ) : null}
+          <Text color={preview.dim ? theme.dim : undefined} italic={inactive && !isRequest}>
+            {preview.text}
+          </Text>
         </Text>
       </Box>
       <Box width={9} flexShrink={0} justifyContent="flex-end">
