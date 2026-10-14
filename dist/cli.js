@@ -1,14 +1,23 @@
 #!/usr/bin/env node
 
 // src/cli.tsx
+import fs8 from "fs";
 import { render } from "ink";
 import { spawn as spawn3 } from "child_process";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 
 // src/core/paths.ts
+import crypto from "crypto";
 import os from "os";
 import path from "path";
+var MAX_SOCKET_PATH = 100;
+function socketPath(root, platform = process.platform) {
+  const tag = crypto.createHash("sha256").update(root).digest("hex").slice(0, 12);
+  if (platform === "win32") return `\\\\.\\pipe\\termchat-${tag}`;
+  const inHome = path.join(root, "termchat.sock");
+  return Buffer.byteLength(inHome) <= MAX_SOCKET_PATH ? inHome : path.join(os.tmpdir(), `termchat-${tag}.sock`);
+}
 function resolvePaths(home) {
   const root = path.resolve(home ?? process.env.TERMCHAT_HOME ?? path.join(os.homedir(), ".termchat"));
   return {
@@ -20,7 +29,9 @@ function resolvePaths(home) {
     groupsDir: path.join(root, "groups"),
     groupsMeta: path.join(root, "groups.json"),
     peers: path.join(root, "peers.json"),
-    log: path.join(root, "termchat.log")
+    log: path.join(root, "termchat.log"),
+    lock: path.join(root, "termchat.lock"),
+    socket: socketPath(root)
   };
 }
 
@@ -33,7 +44,7 @@ import path2 from "path";
 // package.json
 var package_default = {
   name: "termchat",
-  version: "1.3.2",
+  version: "1.4.0",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -232,12 +243,143 @@ var restart = false;
 var requestRestart = () => void (restart = true);
 var restartRequested = () => restart;
 
+// src/core/instance.ts
+import fs3 from "fs";
+import net from "net";
+import path4 from "path";
+
+// src/core/storage.ts
+import fs2 from "fs";
+import path3 from "path";
+function readJson(file, fallback) {
+  let raw;
+  try {
+    raw = fs2.readFileSync(file, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return fallback;
+    throw err;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    fs2.renameSync(file, `${file}.corrupt-${Date.now()}`);
+    return fallback;
+  }
+}
+function writeJsonAtomic(file, data) {
+  ensureDir(path3.dirname(file));
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs2.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 384 });
+  fs2.renameSync(tmp, file);
+}
+function appendJsonl(file, entry) {
+  ensureDir(path3.dirname(file));
+  fs2.appendFileSync(file, JSON.stringify(entry) + "\n", { mode: 384 });
+}
+function readJsonl(file) {
+  let raw;
+  try {
+    raw = fs2.readFileSync(file, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return [];
+    throw err;
+  }
+  const out = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+    }
+  }
+  return out;
+}
+function ensureDir(dir) {
+  fs2.mkdirSync(dir, { recursive: true, mode: 448 });
+}
+
+// src/core/instance.ts
+var STARTUP_GRACE = 1e4;
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+function probeSocket(socket, timeoutMs = 1e3) {
+  return new Promise((resolve) => {
+    const c2 = net.connect(socket);
+    const done2 = (ok) => {
+      clearTimeout(timer);
+      c2.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done2(false), timeoutMs);
+    c2.once("connect", () => done2(true));
+    c2.once("error", () => done2(false));
+  });
+}
+function readLock(file) {
+  try {
+    const o = JSON.parse(fs3.readFileSync(file, "utf8"));
+    return Number.isInteger(o?.pid) && typeof o.startedAt === "number" && typeof o.socket === "string" ? o : null;
+  } catch {
+    return null;
+  }
+}
+async function acquireLock(lockFile, socket, opts = {}) {
+  const isAlive = opts.isAlive ?? pidAlive;
+  const probe = opts.probe ?? probeSocket;
+  const now = opts.now ?? Date.now;
+  ensureDir(path4.dirname(lockFile));
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const info = { pid: process.pid, startedAt: now(), socket };
+    try {
+      fs3.writeFileSync(lockFile, JSON.stringify(info), { flag: "wx", mode: 384 });
+      return {
+        release: () => {
+          if (readLock(lockFile)?.pid === process.pid) fs3.rmSync(lockFile, { force: true });
+        }
+      };
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+    }
+    const holder = readLock(lockFile);
+    const stale = !holder || holder.pid === process.pid || !isAlive(holder.pid) || !await probe(holder.socket) && now() - holder.startedAt > STARTUP_GRACE;
+    if (!stale) return { holder };
+    fs3.rmSync(lockFile, { force: true });
+  }
+  throw new Error(`Couldn't take the lock ${lockFile}`);
+}
+async function startInstanceServer(socket) {
+  if (process.platform !== "win32") fs3.rmSync(socket, { force: true });
+  const server = net.createServer((conn) => {
+    conn.on("error", () => {
+    });
+    conn.end();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socket, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  if (process.platform !== "win32") fs3.chmodSync(socket, 384);
+  server.on("error", () => {
+  });
+  server.unref();
+  return server;
+}
+
 // src/ui/App.tsx
-import { Box as Box11, Text as Text11, useApp, useInput as useInput6 } from "ink";
-import { useCallback, useEffect as useEffect6, useMemo as useMemo2, useRef as useRef6, useState as useState8 } from "react";
+import { Box as Box12, Text as Text12, useApp, useInput as useInput6 } from "ink";
+import { useCallback, useEffect as useEffect7, useMemo as useMemo2, useRef as useRef6, useState as useState9 } from "react";
 
 // src/commands/builtin.ts
-import net2 from "net";
+import net3 from "net";
 
 // src/core/clipboard.ts
 import { spawn as spawn2 } from "child_process";
@@ -272,8 +414,8 @@ async function copyToClipboard(text) {
 }
 
 // src/core/export.ts
-import fs2 from "fs";
-import path3 from "path";
+import fs4 from "fs";
+import path5 from "path";
 function stamp(ts) {
   const d = new Date(ts);
   const pad2 = (n) => String(n).padStart(2, "0");
@@ -284,7 +426,7 @@ function exportChat(store, chatId, file) {
   if (!chat) throw new Error("Unknown chat");
   const title = chat.kind === "group" ? `#${chat.display}` : `Chat with ${chat.display}`;
   const safeName = chat.display.replace(/[^\p{L}\p{N}_-]+/gu, "_");
-  const target = path3.resolve(file || `termchat-${safeName}-${stamp(Date.now()).slice(0, 10)}.md`);
+  const target = path5.resolve(file || `termchat-${safeName}-${stamp(Date.now()).slice(0, 10)}.md`);
   const lines = [`# ${title}`, "", `_Exported on ${stamp(Date.now())}_`, ""];
   for (const item of store.items(chatId)) {
     if (item.kind === "note") {
@@ -294,64 +436,12 @@ function exportChat(store, chatId, file) {
     const who = item.mine ? store.me.name : item.senderName;
     lines.push(`**${who}** \xB7 ${stamp(item.ts)}`, "", item.text, "", "---", "");
   }
-  fs2.writeFileSync(target, lines.join("\n"), "utf8");
+  fs4.writeFileSync(target, lines.join("\n"), "utf8");
   return target;
 }
 
 // src/core/identity.ts
-import crypto from "crypto";
-
-// src/core/storage.ts
-import fs3 from "fs";
-import path4 from "path";
-function readJson(file, fallback) {
-  let raw;
-  try {
-    raw = fs3.readFileSync(file, "utf8");
-  } catch (err) {
-    if (err.code === "ENOENT") return fallback;
-    throw err;
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    fs3.renameSync(file, `${file}.corrupt-${Date.now()}`);
-    return fallback;
-  }
-}
-function writeJsonAtomic(file, data) {
-  ensureDir(path4.dirname(file));
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs3.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 384 });
-  fs3.renameSync(tmp, file);
-}
-function appendJsonl(file, entry) {
-  ensureDir(path4.dirname(file));
-  fs3.appendFileSync(file, JSON.stringify(entry) + "\n", { mode: 384 });
-}
-function readJsonl(file) {
-  let raw;
-  try {
-    raw = fs3.readFileSync(file, "utf8");
-  } catch (err) {
-    if (err.code === "ENOENT") return [];
-    throw err;
-  }
-  const out = [];
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {
-    }
-  }
-  return out;
-}
-function ensureDir(dir) {
-  fs3.mkdirSync(dir, { recursive: true, mode: 448 });
-}
-
-// src/core/identity.ts
+import crypto2 from "crypto";
 var BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 function base32(buf) {
   let bits = 0;
@@ -369,7 +459,7 @@ function base32(buf) {
   return out;
 }
 function fingerprint(publicRaw) {
-  return base32(crypto.createHash("sha256").update(publicRaw).digest()).slice(0, 20);
+  return base32(crypto2.createHash("sha256").update(publicRaw).digest()).slice(0, 20);
 }
 function formatId(id, full = false) {
   const groups = (full ? id : id.slice(0, 8)).match(/.{1,4}/g) ?? [];
@@ -377,17 +467,17 @@ function formatId(id, full = false) {
 }
 function safetyCode(a, b) {
   const [first, second] = Buffer.compare(a, b) <= 0 ? [a, b] : [b, a];
-  const digest = crypto.createHash("sha256").update(first).update(second).digest();
+  const digest = crypto2.createHash("sha256").update(first).update(second).digest();
   const groups = [];
   for (let i = 0; i < 6; i++) groups.push(String(digest.readUInt32BE(i * 4) % 1e5).padStart(5, "0"));
   return groups.join(" ");
 }
 function publicKeyFromRaw(raw) {
-  return crypto.createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") }, format: "jwk" });
+  return crypto2.createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") }, format: "jwk" });
 }
 function fromFile(file) {
   const publicRaw = Buffer.from(file.publicKey, "base64url");
-  const privateKey = crypto.createPrivateKey({
+  const privateKey = crypto2.createPrivateKey({
     key: { kty: "OKP", crv: "Ed25519", x: file.publicKey, d: file.privateKey },
     format: "jwk"
   });
@@ -396,7 +486,7 @@ function fromFile(file) {
 function loadOrCreateIdentity(paths) {
   const existing = readJson(paths.identity, null);
   if (existing?.v === 1 && existing.publicKey && existing.privateKey) return fromFile(existing);
-  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const { privateKey } = crypto2.generateKeyPairSync("ed25519");
   const jwk = privateKey.export({ format: "jwk" });
   const file = { v: 1, publicKey: jwk.x, privateKey: jwk.d };
   writeJsonAtomic(paths.identity, file);
@@ -411,7 +501,7 @@ function saveConfig(paths, cfg) {
 }
 
 // src/core/network.ts
-import net from "net";
+import net2 from "net";
 import { EventEmitter as EventEmitter3 } from "events";
 
 // src/core/framing.ts
@@ -541,10 +631,10 @@ var FrameSocket = class extends EventEmitter {
 };
 
 // src/core/handshake.ts
-import crypto3 from "crypto";
+import crypto4 from "crypto";
 
 // src/core/channel.ts
-import crypto2 from "crypto";
+import crypto3 from "crypto";
 var TAG_LEN = 16;
 var CipherState = class {
   constructor(key) {
@@ -559,14 +649,14 @@ var CipherState = class {
     return nonce;
   }
   encrypt(plain) {
-    const cipher = crypto2.createCipheriv("chacha20-poly1305", this.key, this.nextNonce(), { authTagLength: TAG_LEN });
+    const cipher = crypto3.createCipheriv("chacha20-poly1305", this.key, this.nextNonce(), { authTagLength: TAG_LEN });
     const body = Buffer.concat([cipher.update(plain), cipher.final()]);
     return Buffer.concat([body, cipher.getAuthTag()]);
   }
   /** Throws if the frame is not authentic. */
   decrypt(frame) {
     if (frame.length < TAG_LEN) throw new Error("Frame too short");
-    const decipher = crypto2.createDecipheriv("chacha20-poly1305", this.key, this.nextNonce(), {
+    const decipher = crypto3.createDecipheriv("chacha20-poly1305", this.key, this.nextNonce(), {
       authTagLength: TAG_LEN
     });
     decipher.setAuthTag(frame.subarray(frame.length - TAG_LEN));
@@ -613,39 +703,39 @@ function parseHello(frame) {
 function authPayload(role, transcript) {
   return Buffer.concat([Buffer.from(`${PROTOCOL} auth ${role}`), transcript]);
 }
-async function performHandshake(fs7, me, myName, initiator, timeoutMs = HANDSHAKE_TIMEOUT) {
-  const { privateKey: ephPriv, publicKey: ephPub } = crypto3.generateKeyPairSync("x25519");
+async function performHandshake(fs9, me, myName, initiator, timeoutMs = HANDSHAKE_TIMEOUT) {
+  const { privateKey: ephPriv, publicKey: ephPub } = crypto4.generateKeyPairSync("x25519");
   const ephRaw = Buffer.from(ephPub.export({ format: "jwk" }).x, "base64url");
-  const nonce = crypto3.randomBytes(16);
-  fs7.send(
+  const nonce = crypto4.randomBytes(16);
+  fs9.send(
     Buffer.from(
       JSON.stringify({ t: "hello", p: PROTOCOL, eph: ephRaw.toString("base64url"), nonce: nonce.toString("base64url") })
     )
   );
-  const peer = parseHello(await fs7.read(timeoutMs));
+  const peer = parseHello(await fs9.read(timeoutMs));
   if (peer.eph.equals(ephRaw)) throw new HandshakeError("Reflected handshake");
   const [i, r] = initiator ? [{ eph: ephRaw, nonce }, peer] : [peer, { eph: ephRaw, nonce }];
-  const transcript = crypto3.createHash("sha256").update(PROTOCOL).update(i.eph).update(i.nonce).update(r.eph).update(r.nonce).digest();
+  const transcript = crypto4.createHash("sha256").update(PROTOCOL).update(i.eph).update(i.nonce).update(r.eph).update(r.nonce).digest();
   let shared;
   try {
-    const peerEphKey = crypto3.createPublicKey({
+    const peerEphKey = crypto4.createPublicKey({
       key: { kty: "OKP", crv: "X25519", x: peer.eph.toString("base64url") },
       format: "jwk"
     });
-    shared = crypto3.diffieHellman({ privateKey: ephPriv, publicKey: peerEphKey });
+    shared = crypto4.diffieHellman({ privateKey: ephPriv, publicKey: peerEphKey });
   } catch {
     throw new HandshakeError("Invalid key");
   }
   if (shared.every((b) => b === 0)) throw new HandshakeError("Invalid key");
-  const okm = Buffer.from(crypto3.hkdfSync("sha256", shared, transcript, `${PROTOCOL} keys`, 64));
+  const okm = Buffer.from(crypto4.hkdfSync("sha256", shared, transcript, `${PROTOCOL} keys`, 64));
   const i2r = okm.subarray(0, 32);
   const r2i = okm.subarray(32, 64);
   const send = new CipherState(initiator ? i2r : r2i);
   const recv = new CipherState(initiator ? r2i : i2r);
   const myRole = initiator ? "I" : "R";
   const peerRole = initiator ? "R" : "I";
-  const sig = crypto3.sign(null, authPayload(myRole, transcript), me.privateKey);
-  fs7.send(
+  const sig = crypto4.sign(null, authPayload(myRole, transcript), me.privateKey);
+  fs9.send(
     send.encrypt(
       Buffer.from(
         JSON.stringify({ pub: me.publicRaw.toString("base64url"), name: myName, sig: sig.toString("base64url") })
@@ -654,7 +744,7 @@ async function performHandshake(fs7, me, myName, initiator, timeoutMs = HANDSHAK
   );
   let auth;
   try {
-    auth = JSON.parse(recv.decrypt(await fs7.read(timeoutMs)).toString("utf8"));
+    auth = JSON.parse(recv.decrypt(await fs9.read(timeoutMs)).toString("utf8"));
   } catch (err) {
     if (err instanceof Error && /timed out|closed/.test(err.message)) throw err;
     throw new HandshakeError("Authentication failed");
@@ -666,7 +756,7 @@ async function performHandshake(fs7, me, myName, initiator, timeoutMs = HANDSHAK
   if (peerPublicRaw.length !== 32) throw new HandshakeError("Invalid identity key");
   let valid = false;
   try {
-    valid = crypto3.verify(
+    valid = crypto4.verify(
       null,
       authPayload(peerRole, transcript),
       publicKeyFromRaw(peerPublicRaw),
@@ -685,7 +775,7 @@ async function performHandshake(fs7, me, myName, initiator, timeoutMs = HANDSHAK
 import { EventEmitter as EventEmitter2 } from "events";
 
 // src/core/groupEvents.ts
-import crypto4 from "crypto";
+import crypto5 from "crypto";
 var MAX_MEMBERS = 32;
 var EVENT_ID_RE = /^[A-Za-z0-9_-]{32}$/;
 var PEER_ID_RE = /^[A-Z2-7]{20}$/;
@@ -698,7 +788,7 @@ function payload(e) {
   return Buffer.from(JSON.stringify(["termchat/group/1", gid, e.author, e.authorPub, e.seq, e.ts, e.kind, data]));
 }
 function eventId(p) {
-  return crypto4.createHash("sha256").update(p).digest("base64url").slice(0, 32);
+  return crypto5.createHash("sha256").update(p).digest("base64url").slice(0, 32);
 }
 function signEvent(me, fields) {
   const unsigned = {
@@ -713,7 +803,7 @@ function signEvent(me, fields) {
   };
   const p = payload(unsigned);
   const id = eventId(p);
-  const sig = crypto4.sign(null, p, me.privateKey).toString("base64url");
+  const sig = crypto5.sign(null, p, me.privateKey).toString("base64url");
   return { ...unsigned, gid: fields.kind === "create" ? id : fields.gid, id, sig };
 }
 var str = (v, max) => typeof v === "string" && v.length <= max;
@@ -757,7 +847,7 @@ function verifyEvent(e) {
   if (eventId(p) !== e.id) return false;
   if (e.kind === "create" ? e.gid !== e.id : e.gid === e.id) return false;
   try {
-    return crypto4.verify(null, p, publicKeyFromRaw(pub), Buffer.from(e.sig, "base64url"));
+    return crypto5.verify(null, p, publicKeyFromRaw(pub), Buffer.from(e.sig, "base64url"));
   } catch {
     return false;
   }
@@ -940,17 +1030,17 @@ var IDLE_TIMEOUT = 45e3;
 var RATE_WINDOW = 1e3;
 var RATE_MAX = 200;
 var Session = class extends EventEmitter2 {
-  constructor(fs7, hs, initiator, tag) {
+  constructor(fs9, hs, initiator, tag) {
     super();
-    this.fs = fs7;
+    this.fs = fs9;
     this.hs = hs;
     this.initiator = initiator;
     this.tag = tag;
     this.peerId = hs.peerId;
     this.peerPublicRaw = hs.peerPublicRaw;
     this.peerName = hs.peerName;
-    fs7.on("frame", (frame) => this.onFrame(frame));
-    fs7.on("close", (err) => this.finish(err ? err.message : "Connection closed"));
+    fs9.on("frame", (frame) => this.onFrame(frame));
+    fs9.on("close", (err) => this.finish(err ? err.message : "Connection closed"));
     this.timer = setInterval(() => this.tick(), PING_INTERVAL / 3);
     this.timer.unref();
   }
@@ -1050,7 +1140,7 @@ var Network = class extends EventEmitter3 {
   /** Listens on the preferred port, or on a free one if it's taken. */
   async start(preferredPort = DEFAULT_PORT) {
     const tryListen = (port) => new Promise((resolve, reject) => {
-      const server = net.createServer((socket) => this.onIncoming(socket));
+      const server = net2.createServer((socket) => this.onIncoming(socket));
       server.once("error", reject);
       server.listen(port, "0.0.0.0", () => {
         server.off("error", reject);
@@ -1080,7 +1170,7 @@ var Network = class extends EventEmitter3 {
    */
   async dial(host, port, expectedId, tag) {
     const socket = await new Promise((resolve, reject) => {
-      const s = net.connect({ host, port });
+      const s = net2.connect({ host, port });
       const timer = setTimeout(() => {
         s.destroy();
         reject(new Error("Connection timed out"));
@@ -1095,15 +1185,15 @@ var Network = class extends EventEmitter3 {
         reject(err);
       });
     });
-    const fs7 = new FrameSocket(socket);
+    const fs9 = new FrameSocket(socket);
     try {
-      const hs = await performHandshake(fs7, this.me, this.getName(), true);
+      const hs = await performHandshake(fs9, this.me, this.getName(), true);
       if (expectedId && hs.peerId !== expectedId) {
         throw new HandshakeError("Someone else is now reachable at this address");
       }
-      return this.register(new Session(fs7, hs, true, tag));
+      return this.register(new Session(fs9, hs, true, tag));
     } catch (err) {
-      fs7.destroy();
+      fs9.destroy();
       throw err;
     }
   }
@@ -1113,13 +1203,13 @@ var Network = class extends EventEmitter3 {
       return;
     }
     this.pendingHandshakes++;
-    const fs7 = new FrameSocket(socket);
+    const fs9 = new FrameSocket(socket);
     try {
-      const hs = await performHandshake(fs7, this.me, this.getName(), false);
-      this.register(new Session(fs7, hs, false));
+      const hs = await performHandshake(fs9, this.me, this.getName(), false);
+      this.register(new Session(fs9, hs, false));
     } catch (err) {
-      this.emit("log", `Rejected incoming connection from ${fs7.remoteAddress}: ${err.message}`);
-      fs7.destroy();
+      this.emit("log", `Rejected incoming connection from ${fs9.remoteAddress}: ${err.message}`);
+      fs9.destroy();
     } finally {
       this.pendingHandshakes--;
     }
@@ -1405,6 +1495,30 @@ function effectTime(mode, now, since) {
   const t = Math.max(0, now - since);
   return mode === "brief" ? Math.min(t, ANIM_MS) : t;
 }
+var LOGO_SWEEP = 900;
+var LOGO_HALF = 4;
+function logoShineColor(base, col, row, width, t) {
+  const u = t / LOGO_SWEEP;
+  if (u < 0 || u >= 1) return base;
+  const center = (width + 2 * LOGO_HALF + 6) * u - LOGO_HALF - 6 + row;
+  const strength = Math.max(0, 1 - Math.abs(col + 0.5 - center) / LOGO_HALF);
+  return mix(base, WHITE, strength * 0.85);
+}
+function logoLine(line, row, width, hex, t) {
+  if (t < 0 || t >= LOGO_SWEEP) return chalk2.hex(hex)(line);
+  const base = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  let out = "";
+  let col = 0;
+  for (const ch of line) {
+    if (ch === " ") out += ch;
+    else {
+      const [r, g, b] = logoShineColor(base, col, row, width, t);
+      out += chalk2.rgb(Math.round(r), Math.round(g), Math.round(b))(ch);
+    }
+    col++;
+  }
+  return out;
+}
 
 // src/ui/markdown.ts
 import chalk3 from "chalk";
@@ -1647,8 +1761,8 @@ function codeBlocks(text) {
 }
 
 // src/core/store.ts
-import crypto5 from "crypto";
-import fs6 from "fs";
+import crypto6 from "crypto";
+import fs7 from "fs";
 
 // src/core/contacts.ts
 function displayName(c2) {
@@ -1738,14 +1852,14 @@ function* scanOrder(ifaces) {
     if (prefix > 30 || i.address.startsWith("169.254.")) return [];
     const mask = prefix < MIN_SCAN_PREFIX ? 4294901760 : toInt(i.netmask);
     const ip = toInt(i.address);
-    const net3 = (ip & mask) >>> 0;
-    const broadcast = (net3 | ~mask >>> 0) >>> 0;
-    return [{ ip, net: net3, broadcast }];
+    const net4 = (ip & mask) >>> 0;
+    const broadcast = (net4 | ~mask >>> 0) >>> 0;
+    return [{ ip, net: net4, broadcast }];
   });
-  const gens = ranges.map(function* ({ ip, net: net3, broadcast }) {
-    for (let d = 1; ip + d < broadcast || ip - d > net3; d++) {
+  const gens = ranges.map(function* ({ ip, net: net4, broadcast }) {
+    for (let d = 1; ip + d < broadcast || ip - d > net4; d++) {
       if (ip + d < broadcast) yield toIp(ip + d);
-      if (ip - d > net3) yield toIp(ip - d);
+      if (ip - d > net4) yield toIp(ip - d);
     }
   });
   const seen = /* @__PURE__ */ new Set();
@@ -1968,15 +2082,15 @@ var Discovery = class extends EventEmitter4 {
 };
 
 // src/core/history.ts
-import fs4 from "fs";
-import path5 from "path";
+import fs5 from "fs";
+import path6 from "path";
 var HistoryStore = class {
   constructor(paths) {
     this.paths = paths;
   }
   cache = /* @__PURE__ */ new Map();
   file(peerId) {
-    return path5.join(this.paths.historyDir, `${peerId}.jsonl`);
+    return path6.join(this.paths.historyDir, `${peerId}.jsonl`);
   }
   get(peerId) {
     const cached = this.cache.get(peerId);
@@ -2053,14 +2167,14 @@ var HistoryStore = class {
     return list[list.length - 1];
   }
   delete(peerId) {
-    fs4.rmSync(this.file(peerId), { force: true });
+    fs5.rmSync(this.file(peerId), { force: true });
     this.cache.set(peerId, []);
   }
 };
 
 // src/core/groups.ts
-import fs5 from "fs";
-import path6 from "path";
+import fs6 from "fs";
+import path7 from "path";
 var BATCH_BYTES = 4e4;
 var GroupManager = class {
   constructor(paths, me, hooks) {
@@ -2076,12 +2190,12 @@ var GroupManager = class {
   synced = /* @__PURE__ */ new Map();
   // ───────────── Storage ─────────────
   file(gid) {
-    return path6.join(this.paths.groupsDir, `${gid}.jsonl`);
+    return path7.join(this.paths.groupsDir, `${gid}.jsonl`);
   }
   load() {
     let files = [];
     try {
-      files = fs5.readdirSync(this.paths.groupsDir).filter((f) => f.endsWith(".jsonl"));
+      files = fs6.readdirSync(this.paths.groupsDir).filter((f) => f.endsWith(".jsonl"));
     } catch {
       return;
     }
@@ -2089,7 +2203,7 @@ var GroupManager = class {
       const gid = f.slice(0, -".jsonl".length);
       const events = /* @__PURE__ */ new Map();
       const has = /* @__PURE__ */ new Map();
-      for (const line of readJsonl(path6.join(this.paths.groupsDir, f))) {
+      for (const line of readJsonl(path7.join(this.paths.groupsDir, f))) {
         if (line.k === "ev") {
           const ev = parseEvent(line.ev);
           if (ev && ev.gid === gid) events.set(ev.id, ev);
@@ -2214,7 +2328,7 @@ var GroupManager = class {
     this.groups.delete(gid);
     delete this.meta[gid];
     this.saveMeta();
-    fs5.rmSync(this.file(gid), { force: true });
+    fs6.rmSync(this.file(gid), { force: true });
     this.hooks.changed();
   }
   require(gid, status) {
@@ -2739,7 +2853,7 @@ var AppStore = class {
     }
   }
   note(chatId, text, kind = "info") {
-    const list = [...this.notesFor(chatId), { id: crypto5.randomUUID(), ts: Date.now(), text, kind }];
+    const list = [...this.notesFor(chatId), { id: crypto6.randomUUID(), ts: Date.now(), text, kind }];
     this.notes.set(chatId, list.slice(-50));
     this.changed();
   }
@@ -2770,7 +2884,7 @@ var AppStore = class {
   log(line) {
     if (!this.opts.debug) return;
     try {
-      fs6.appendFileSync(this.opts.paths.log, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+      fs7.appendFileSync(this.opts.paths.log, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
 `);
     } catch {
     }
@@ -2785,7 +2899,7 @@ var AppStore = class {
     if (c2.state === "incoming") return { ok: false, error: "Accept the request first: /accept" };
     if (c2.state === "blocked") return { ok: false, error: "Contact is blocked: /unblock" };
     if (c2.state === "declined") return { ok: false, error: "Your request was declined. Ask again: /request" };
-    const msg = { id: crypto5.randomUUID(), from: "me", text, ts: Date.now(), status: "pending" };
+    const msg = { id: crypto6.randomUUID(), from: "me", text, ts: Date.now(), status: "pending" };
     this.history.add(id, msg);
     this.contacts.upsert(id, { lastActivity: msg.ts });
     if (c2.state === "accepted") this.network.get(id)?.send({ t: "msg", id: msg.id, ts: msg.ts, text: msg.text });
@@ -2948,6 +3062,10 @@ var AppStore = class {
     for (const id of this.network.sessions.keys()) this.sendPresence(id);
     if (focused && this.activeChat) this.seeChat(this.activeChat);
     this.changed();
+  }
+  /** False while the terminal window is in the background (if the terminal reports focus). */
+  get isFocused() {
+    return this.focused;
   }
   sendPresence(id) {
     this.network.get(id)?.send({ t: "presence", away: !this.focused });
@@ -3348,7 +3466,7 @@ function parseAddress(input) {
   const host = m[1];
   const port = m[2] ? Number(m[2]) : DEFAULT_PORT;
   if (port < 1 || port > 65535) throw new Error(`Invalid port: ${m[2]}`);
-  if (!net2.isIP(host) && !/^[a-z0-9.-]+$/i.test(host)) throw new Error(`Invalid address: ${input}`);
+  if (!net3.isIP(host) && !/^[a-z0-9.-]+$/i.test(host)) throw new Error(`Invalid address: ${input}`);
   return { host, port };
 }
 var builtinCommands = [
@@ -4790,9 +4908,73 @@ function Chat({ store, id, width, height, actions, dialog, editor, setEditor, hi
 }
 
 // src/ui/screens/ChatList.tsx
-import { Box as Box9, Text as Text9, useInput as useInput4 } from "ink";
-import { useRef as useRef5, useState as useState6 } from "react";
-import { Fragment as Fragment3, jsx as jsx9, jsxs as jsxs9 } from "react/jsx-runtime";
+import { Box as Box10, Text as Text10, useInput as useInput4 } from "ink";
+import { useRef as useRef5, useState as useState7 } from "react";
+
+// src/ui/components/Banner.tsx
+import { Box as Box9, Text as Text9 } from "ink";
+import stringWidth5 from "string-width";
+import { useEffect as useEffect6, useState as useState6 } from "react";
+import { jsx as jsx9, jsxs as jsxs9 } from "react/jsx-runtime";
+var LOGO = [
+  "\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2557   \u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2557  \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557",
+  "\u255A\u2550\u2550\u2588\u2588\u2554\u2550\u2550\u255D\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255D\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255D\u2588\u2588\u2551  \u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u255A\u2550\u2550\u2588\u2588\u2554\u2550\u2550\u255D",
+  "   \u2588\u2588\u2551   \u2588\u2588\u2588\u2588\u2588\u2557  \u2588\u2588\u2588\u2588\u2588\u2588\u2554\u255D\u2588\u2588\u2554\u2588\u2588\u2588\u2588\u2554\u2588\u2588\u2551\u2588\u2588\u2551     \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2551   \u2588\u2588\u2551   ",
+  "   \u2588\u2588\u2551   \u2588\u2588\u2554\u2550\u2550\u255D  \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2557\u2588\u2588\u2551\u255A\u2588\u2588\u2554\u255D\u2588\u2588\u2551\u2588\u2588\u2551     \u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551\u2588\u2588\u2554\u2550\u2550\u2588\u2588\u2551   \u2588\u2588\u2551   ",
+  "   \u2588\u2588\u2551   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551  \u2588\u2588\u2551\u2588\u2588\u2551 \u255A\u2550\u255D \u2588\u2588\u2551\u255A\u2588\u2588\u2588\u2588\u2588\u2588\u2557\u2588\u2588\u2551  \u2588\u2588\u2551\u2588\u2588\u2551  \u2588\u2588\u2551   \u2588\u2588\u2551   ",
+  "   \u255A\u2550\u255D   \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u255D\u255A\u2550\u255D  \u255A\u2550\u255D\u255A\u2550\u255D     \u255A\u2550\u255D \u255A\u2550\u2550\u2550\u2550\u2550\u255D\u255A\u2550\u255D  \u255A\u2550\u255D\u255A\u2550\u255D  \u255A\u2550\u255D   \u255A\u2550\u255D   "
+];
+var LOGO_SMALL = ["\u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2588 \u2588\u2580\u2584\u2580\u2588 \u2588\u2580\u2580 \u2588 \u2588 \u2584\u2580\u2588 \u2580\u2588\u2580", " \u2588  \u2588\u2588\u2584 \u2588\u2580\u2584 \u2588 \u2580 \u2588 \u2588\u2584\u2584 \u2588\u2580\u2588 \u2588\u2580\u2588  \u2588 "];
+var LOGO_WIDTH = stringWidth5(LOGO[0]);
+function bannerCompact(width, height) {
+  return width < 80 || height < 22;
+}
+function bannerHeight(compact) {
+  return (compact ? LOGO_SMALL.length : LOGO.length) + 3;
+}
+var SHINE_EVERY = 6e3;
+function useShine(active, delay = 250) {
+  const [t, setT] = useState6(-1);
+  useEffect6(() => {
+    if (!active) {
+      setT(-1);
+      return;
+    }
+    let sweep = null;
+    let next = null;
+    const play = () => {
+      const t0 = Date.now();
+      sweep = setInterval(() => {
+        const dt = Date.now() - t0;
+        if (dt < LOGO_SWEEP) return setT(dt);
+        if (sweep) clearInterval(sweep);
+        sweep = null;
+        setT(-1);
+        next = setTimeout(play, SHINE_EVERY - LOGO_SWEEP);
+      }, 33);
+    };
+    next = setTimeout(play, delay);
+    return () => {
+      if (next) clearTimeout(next);
+      if (sweep) clearInterval(sweep);
+    };
+  }, [active, delay]);
+  return t;
+}
+function Banner({ width, compact, animate = true }) {
+  const t = useShine(animate);
+  const logo = compact ? LOGO_SMALL : LOGO;
+  const logoWidth = compact ? stringWidth5(LOGO_SMALL[0]) : LOGO_WIDTH;
+  return /* @__PURE__ */ jsxs9(Box9, { flexDirection: "column", width, alignItems: "center", flexShrink: 0, children: [
+    logo.map((line, i) => /* @__PURE__ */ jsx9(Text9, { children: logoLine(line, i, logoWidth, theme.accent, t) }, i)),
+    /* @__PURE__ */ jsx9(Text9, { children: " " }),
+    /* @__PURE__ */ jsx9(Text9, { color: theme.faint, wrap: "truncate-end", children: "end-to-end encrypted chat for your local network" }),
+    /* @__PURE__ */ jsx9(Text9, { children: " " })
+  ] });
+}
+
+// src/ui/screens/ChatList.tsx
+import { Fragment as Fragment3, jsx as jsx10, jsxs as jsxs10 } from "react/jsx-runtime";
 function previewOf(c2, store) {
   if (c2.kind === "group") {
     if (c2.myStatus === "invited") {
@@ -4831,9 +5013,9 @@ function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect
   let selected = entries.findIndex((e) => e.key === selectedKey);
   if (selected === -1) selected = 0;
   const current = entries[selected];
-  const [commandMode, setCommandMode] = useState6(false);
+  const [commandMode, setCommandMode] = useState7(false);
   const commandRef = useRef5(false);
-  const [editor, setEditor] = useState6(emptyEditor);
+  const [editor, setEditor] = useState7(emptyEditor);
   const closeCommand = () => {
     commandRef.current = false;
     setCommandMode(false);
@@ -4952,7 +5134,9 @@ function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect
   );
   const inner = width - 2;
   const bottom = dialog ? dialogHeight(dialog) : commandMode ? inputBoxHeight(editor, width) + menuHeight(cmd.items.length) : 0;
-  const bodyHeight = Math.max(3, height - bottom - 1);
+  const compact = bannerCompact(width, height);
+  const banner = height - bannerHeight(compact) - 1 >= 8 ? bannerHeight(compact) : 0;
+  const bodyHeight = Math.max(3, height - banner - bottom - 1);
   const lines = [];
   const section = (title, list, showEmpty = false) => {
     if (!list.length && !showEmpty) return;
@@ -4980,16 +5164,17 @@ function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect
     } else base.push("enter open", "r rename", "d remove");
     return [...base, "g new group", "a add by IP", "/ commands", "q quit"];
   })();
-  return /* @__PURE__ */ jsxs9(Box9, { flexDirection: "column", width, height, children: [
-    /* @__PURE__ */ jsx9(Box9, { flexDirection: "column", height: bodyHeight, paddingX: 1, overflow: "hidden", children: entries.length === 0 ? /* @__PURE__ */ jsx9(EmptyState, { store }) : visible.map((l, i) => {
-      if (l.kind === "gap") return /* @__PURE__ */ jsx9(Text9, { children: " " }, i);
+  return /* @__PURE__ */ jsxs10(Box10, { flexDirection: "column", width, height, children: [
+    banner ? /* @__PURE__ */ jsx10(Banner, { width, compact, animate: store.isFocused && !dialog && !commandMode }) : null,
+    /* @__PURE__ */ jsx10(Box10, { flexDirection: "column", height: bodyHeight, paddingX: 1, overflow: "hidden", children: entries.length === 0 ? /* @__PURE__ */ jsx10(EmptyState, { store }) : visible.map((l, i) => {
+      if (l.kind === "gap") return /* @__PURE__ */ jsx10(Text10, { children: " " }, i);
       if (l.kind === "section") {
-        return /* @__PURE__ */ jsx9(Text9, { color: theme.dim, bold: true, children: l.title.toUpperCase() }, i);
+        return /* @__PURE__ */ jsx10(Text10, { color: theme.dim, bold: true, children: l.title.toUpperCase() }, i);
       }
-      return /* @__PURE__ */ jsx9(Row, { entry: l.entry, selected: l.index === selected, width: inner, store }, l.entry.key);
+      return /* @__PURE__ */ jsx10(Row, { entry: l.entry, selected: l.index === selected, width: inner, store }, l.entry.key);
     }) }),
-    dialog ? /* @__PURE__ */ jsx9(Dialog, { spec: dialog, width }) : commandMode ? /* @__PURE__ */ jsxs9(Fragment3, { children: [
-      /* @__PURE__ */ jsx9(
+    dialog ? /* @__PURE__ */ jsx10(Dialog, { spec: dialog, width }) : commandMode ? /* @__PURE__ */ jsxs10(Fragment3, { children: [
+      /* @__PURE__ */ jsx10(
         InputBox,
         {
           state: editor,
@@ -5003,21 +5188,21 @@ function ChatList({ store, width, height, actions, dialog, selectedKey, onSelect
           singleLine: true
         }
       ),
-      /* @__PURE__ */ jsx9(CommandMenu, { items: cmd.items, selected: cmd.selected, width })
+      /* @__PURE__ */ jsx10(CommandMenu, { items: cmd.items, selected: cmd.selected, width })
     ] }) : null,
-    /* @__PURE__ */ jsx9(Footer, { hints: commandMode ? ["enter run", "tab complete", "esc cancel"] : hints, toast: store.toast, width })
+    /* @__PURE__ */ jsx10(Footer, { hints: commandMode ? ["enter run", "tab complete", "esc cancel"] : hints, toast: store.toast, width })
   ] });
 }
 function Row({ entry, selected, width, store }) {
-  const pointer = /* @__PURE__ */ jsx9(Box9, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: selected ? icons.pointer : " " }) });
+  const pointer = /* @__PURE__ */ jsx10(Box10, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: selected ? icons.pointer : " " }) });
   const nameWidth = Math.min(22, Math.max(10, Math.floor(width * 0.25)));
   if (entry.type === "nearby") {
     const p = entry.peer;
-    return /* @__PURE__ */ jsxs9(Box9, { children: [
+    return /* @__PURE__ */ jsxs10(Box10, { children: [
       pointer,
-      /* @__PURE__ */ jsx9(Box9, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx9(Text9, { color: theme.success, children: icons.online }) }),
-      /* @__PURE__ */ jsx9(Box9, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx9(Text9, { bold: selected, color: selected ? theme.accent : void 0, wrap: "truncate-end", children: p.name }) }),
-      /* @__PURE__ */ jsxs9(Text9, { color: theme.dim, wrap: "truncate-end", children: [
+      /* @__PURE__ */ jsx10(Box10, { width: 2, flexShrink: 0, children: /* @__PURE__ */ jsx10(Text10, { color: theme.success, children: icons.online }) }),
+      /* @__PURE__ */ jsx10(Box10, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx10(Text10, { bold: selected, color: selected ? theme.accent : void 0, wrap: "truncate-end", children: p.name }) }),
+      /* @__PURE__ */ jsxs10(Text10, { color: theme.dim, wrap: "truncate-end", children: [
         "on your network \xB7 ",
         p.ip
       ] })
@@ -5028,58 +5213,58 @@ function Row({ entry, selected, width, store }) {
   const isGroup = c2.kind === "group";
   const preview = previewOf(c2, store);
   const inactive = isGroup ? c2.myStatus !== "member" && c2.myStatus !== "invited" : c2.state !== "accepted";
-  const dot = /* @__PURE__ */ jsx9(Box9, { width: 2, flexShrink: 0, children: isRequest ? /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: icons.request }) : isGroup ? /* @__PURE__ */ jsx9(Text9, { color: inactive ? theme.faint : theme.accent, bold: true, children: icons.group }) : /* @__PURE__ */ jsx9(Text9, { color: c2.inactive ? theme.warning : c2.online ? theme.success : theme.faint, children: c2.inactive ? icons.away : c2.online ? icons.online : icons.offline }) });
+  const dot = /* @__PURE__ */ jsx10(Box10, { width: 2, flexShrink: 0, children: isRequest ? /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: icons.request }) : isGroup ? /* @__PURE__ */ jsx10(Text10, { color: inactive ? theme.faint : theme.accent, bold: true, children: icons.group }) : /* @__PURE__ */ jsx10(Text10, { color: c2.inactive ? theme.warning : c2.online ? theme.success : theme.faint, children: c2.inactive ? icons.away : c2.online ? icons.online : icons.offline }) });
   const time = c2.last ? shortTime(c2.last.ts) : "";
-  return /* @__PURE__ */ jsxs9(Box9, { children: [
+  return /* @__PURE__ */ jsxs10(Box10, { children: [
     pointer,
     dot,
-    /* @__PURE__ */ jsx9(Box9, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx9(Text9, { bold: selected || c2.unread > 0, color: selected ? theme.accent : void 0, wrap: "truncate-end", children: c2.display }) }),
-    /* @__PURE__ */ jsx9(Box9, { flexGrow: 1, flexShrink: 1, minWidth: 0, children: /* @__PURE__ */ jsx9(Text9, { color: preview.dim ? theme.dim : void 0, italic: inactive && !isRequest, wrap: "truncate-end", children: preview.text }) }),
-    /* @__PURE__ */ jsx9(Box9, { width: 9, flexShrink: 0, justifyContent: "flex-end", children: /* @__PURE__ */ jsx9(Text9, { color: theme.faint, children: time }) }),
-    /* @__PURE__ */ jsx9(Box9, { width: 5, flexShrink: 0, justifyContent: "flex-end", children: c2.unread > 0 ? /* @__PURE__ */ jsx9(Text9, { backgroundColor: theme.accent, color: "#1E1E1E", bold: true, children: ` ${c2.unread > 99 ? "99+" : c2.unread} ` }) : null })
+    /* @__PURE__ */ jsx10(Box10, { width: nameWidth, flexShrink: 0, children: /* @__PURE__ */ jsx10(Text10, { bold: selected || c2.unread > 0, color: selected ? theme.accent : void 0, wrap: "truncate-end", children: c2.display }) }),
+    /* @__PURE__ */ jsx10(Box10, { flexGrow: 1, flexShrink: 1, minWidth: 0, children: /* @__PURE__ */ jsx10(Text10, { color: preview.dim ? theme.dim : void 0, italic: inactive && !isRequest, wrap: "truncate-end", children: preview.text }) }),
+    /* @__PURE__ */ jsx10(Box10, { width: 9, flexShrink: 0, justifyContent: "flex-end", children: /* @__PURE__ */ jsx10(Text10, { color: theme.faint, children: time }) }),
+    /* @__PURE__ */ jsx10(Box10, { width: 5, flexShrink: 0, justifyContent: "flex-end", children: c2.unread > 0 ? /* @__PURE__ */ jsx10(Text10, { backgroundColor: theme.accent, color: "#1E1E1E", bold: true, children: ` ${c2.unread > 99 ? "99+" : c2.unread} ` }) : null })
   ] });
 }
 function EmptyState({ store }) {
   const me = store.me;
-  return /* @__PURE__ */ jsxs9(Box9, { flexDirection: "column", paddingTop: 1, paddingX: 1, children: [
-    /* @__PURE__ */ jsx9(Text9, { bold: true, children: "No chats yet" }),
-    /* @__PURE__ */ jsx9(Text9, { children: " " }),
-    /* @__PURE__ */ jsx9(Text9, { color: theme.dim, children: "Other termchat users on the same network show up here automatically" }),
-    /* @__PURE__ */ jsx9(Text9, { color: theme.dim, children: 'under "Nearby". Press enter to send them a chat request.' }),
-    me.scanning ? /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: "Searching the network \u2026" }) : null,
-    /* @__PURE__ */ jsxs9(Text9, { color: theme.dim, children: [
+  return /* @__PURE__ */ jsxs10(Box10, { flexDirection: "column", paddingTop: 1, paddingX: 1, children: [
+    /* @__PURE__ */ jsx10(Text10, { bold: true, children: "No chats yet" }),
+    /* @__PURE__ */ jsx10(Text10, { children: " " }),
+    /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: "Other termchat users on the same network show up here automatically" }),
+    /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: 'under "Nearby". Press enter to send them a chat request.' }),
+    me.scanning ? /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: "Searching the network \u2026" }) : null,
+    /* @__PURE__ */ jsxs10(Text10, { color: theme.dim, children: [
       "Once you have contacts, press ",
-      /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: "g" }),
+      /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: "g" }),
       " to start a group chat."
     ] }),
-    /* @__PURE__ */ jsx9(Text9, { children: " " }),
-    /* @__PURE__ */ jsxs9(Text9, { color: theme.dim, children: [
+    /* @__PURE__ */ jsx10(Text10, { children: " " }),
+    /* @__PURE__ */ jsxs10(Text10, { color: theme.dim, children: [
       "Someone not showing up? Press ",
-      /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: "a" }),
+      /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: "a" }),
       " and enter their IP."
     ] }),
-    /* @__PURE__ */ jsxs9(Text9, { color: theme.dim, children: [
+    /* @__PURE__ */ jsxs10(Text10, { color: theme.dim, children: [
       "Your address for others:",
       " ",
-      /* @__PURE__ */ jsx9(Text9, { color: theme.accent, children: me.ips.length ? me.ips.map((ip) => `${ip}:${me.port}`).join(", ") : "no network" })
+      /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: me.ips.length ? me.ips.map((ip) => `${ip}:${me.port}`).join(", ") : "no network" })
     ] })
   ] });
 }
 
 // src/ui/screens/Onboarding.tsx
-import { Box as Box10, Text as Text10, useInput as useInput5 } from "ink";
-import { useState as useState7 } from "react";
-import { Fragment as Fragment4, jsx as jsx10, jsxs as jsxs10 } from "react/jsx-runtime";
-var LOGO = [
+import { Box as Box11, Text as Text11, useInput as useInput5 } from "ink";
+import { useState as useState8 } from "react";
+import { Fragment as Fragment4, jsx as jsx11, jsxs as jsxs11 } from "react/jsx-runtime";
+var LOGO2 = [
   "\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E",
   "\u2502   termchat                  \u2502",
   "\u2502   chat on your network      \u2502",
   "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F"
 ];
 function Onboarding({ paths, width, onDone }) {
-  const [editor, setEditor] = useState7(emptyEditor);
-  const [created, setCreated] = useState7(null);
-  const [error, setError] = useState7(null);
+  const [editor, setEditor] = useState8(emptyEditor);
+  const [created, setCreated] = useState8(null);
+  const [error, setError] = useState8(null);
   useInput5((_i, key) => key.return && onDone(), { isActive: created !== null });
   const submit = (value) => {
     const name = value.trim();
@@ -5095,36 +5280,36 @@ function Onboarding({ paths, width, onDone }) {
     }
   };
   const boxWidth = Math.min(64, width - 4);
-  return /* @__PURE__ */ jsxs10(Box10, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [
-    LOGO.map((l, i) => /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: l }, i)),
-    /* @__PURE__ */ jsx10(Text10, { children: " " }),
-    created ? /* @__PURE__ */ jsxs10(Fragment4, { children: [
-      /* @__PURE__ */ jsxs10(Text10, { children: [
+  return /* @__PURE__ */ jsxs11(Box11, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [
+    LOGO2.map((l, i) => /* @__PURE__ */ jsx11(Text11, { color: theme.accent, children: l }, i)),
+    /* @__PURE__ */ jsx11(Text11, { children: " " }),
+    created ? /* @__PURE__ */ jsxs11(Fragment4, { children: [
+      /* @__PURE__ */ jsxs11(Text11, { children: [
         "Welcome, ",
-        /* @__PURE__ */ jsx10(Text10, { bold: true, children: created.name }),
+        /* @__PURE__ */ jsx11(Text11, { bold: true, children: created.name }),
         "!"
       ] }),
-      /* @__PURE__ */ jsx10(Text10, { children: " " }),
-      /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: "Your personal ID has been created:" }),
-      /* @__PURE__ */ jsxs10(Text10, { color: theme.accent, bold: true, children: [
+      /* @__PURE__ */ jsx11(Text11, { children: " " }),
+      /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "Your personal ID has been created:" }),
+      /* @__PURE__ */ jsxs11(Text11, { color: theme.accent, bold: true, children: [
         "  ",
         formatId(created.id, true)
       ] }),
-      /* @__PURE__ */ jsx10(Text10, { children: " " }),
-      /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: "It's tied to a secret key on this device. That's how your contacts recognize" }),
-      /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: "you \u2013 even if your name or IP address changes." }),
-      /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: "All messages are end-to-end encrypted." }),
-      /* @__PURE__ */ jsx10(Text10, { children: " " }),
-      /* @__PURE__ */ jsxs10(Text10, { children: [
+      /* @__PURE__ */ jsx11(Text11, { children: " " }),
+      /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "It's tied to a secret key on this device. That's how your contacts recognize" }),
+      /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "you \u2013 even if your name or IP address changes." }),
+      /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "All messages are end-to-end encrypted." }),
+      /* @__PURE__ */ jsx11(Text11, { children: " " }),
+      /* @__PURE__ */ jsxs11(Text11, { children: [
         "Press ",
-        /* @__PURE__ */ jsx10(Text10, { color: theme.accent, children: "enter" }),
+        /* @__PURE__ */ jsx11(Text11, { color: theme.accent, children: "enter" }),
         " to continue"
       ] })
-    ] }) : /* @__PURE__ */ jsxs10(Fragment4, { children: [
-      /* @__PURE__ */ jsx10(Text10, { bold: true, children: "What should others see you as?" }),
-      /* @__PURE__ */ jsx10(Text10, { color: theme.dim, children: "You can change it later with /name." }),
-      /* @__PURE__ */ jsx10(Text10, { children: " " }),
-      /* @__PURE__ */ jsx10(
+    ] }) : /* @__PURE__ */ jsxs11(Fragment4, { children: [
+      /* @__PURE__ */ jsx11(Text11, { bold: true, children: "What should others see you as?" }),
+      /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "You can change it later with /name." }),
+      /* @__PURE__ */ jsx11(Text11, { children: " " }),
+      /* @__PURE__ */ jsx11(
         InputBox,
         {
           state: editor,
@@ -5140,17 +5325,17 @@ function Onboarding({ paths, width, onDone }) {
           borderColor: theme.accent
         }
       ),
-      error ? /* @__PURE__ */ jsx10(Text10, { color: theme.error, children: error }) : null
+      error ? /* @__PURE__ */ jsx11(Text11, { color: theme.error, children: error }) : null
     ] })
   ] });
 }
 
 // src/ui/App.tsx
-import { jsx as jsx11, jsxs as jsxs11 } from "react/jsx-runtime";
+import { jsx as jsx12, jsxs as jsxs12 } from "react/jsx-runtime";
 function Root({ paths, options }) {
   const { exit } = useApp();
   const { columns, rows } = useTerminalSize();
-  const [phase, setPhase] = useState8(() => loadConfig(paths) ? { name: "starting" } : { name: "onboarding" });
+  const [phase, setPhase] = useState9(() => loadConfig(paths) ? { name: "starting" } : { name: "onboarding" });
   const storeRef = useRef6(null);
   const quitting = useRef6(false);
   const quit = useCallback(() => {
@@ -5162,7 +5347,7 @@ function Root({ paths, options }) {
   useInput6((input, key) => {
     if (key.ctrl && input === "c") quit();
   });
-  useEffect6(() => {
+  useEffect7(() => {
     if (phase.name !== "starting") return;
     let cancelled = false;
     (async () => {
@@ -5182,32 +5367,32 @@ function Root({ paths, options }) {
   }, [phase.name]);
   const height = Math.max(10, rows - 1);
   if (phase.name === "onboarding") {
-    return /* @__PURE__ */ jsx11(Onboarding, { paths, width: columns, onDone: () => setPhase({ name: "starting" }) });
+    return /* @__PURE__ */ jsx12(Onboarding, { paths, width: columns, onDone: () => setPhase({ name: "starting" }) });
   }
   if (phase.name === "starting") {
-    return /* @__PURE__ */ jsx11(Box11, { paddingX: 2, paddingY: 1, children: /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "Starting termchat \u2026" }) });
+    return /* @__PURE__ */ jsx12(Box12, { paddingX: 2, paddingY: 1, children: /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "Starting termchat \u2026" }) });
   }
   if (phase.name === "error") {
-    return /* @__PURE__ */ jsxs11(Box11, { paddingX: 2, paddingY: 1, flexDirection: "column", children: [
-      /* @__PURE__ */ jsx11(Text11, { color: theme.error, bold: true, children: "termchat could not start" }),
-      /* @__PURE__ */ jsx11(Text11, { children: phase.message }),
-      /* @__PURE__ */ jsx11(Text11, { color: theme.dim, children: "ctrl+c to quit" })
+    return /* @__PURE__ */ jsxs12(Box12, { paddingX: 2, paddingY: 1, flexDirection: "column", children: [
+      /* @__PURE__ */ jsx12(Text12, { color: theme.error, bold: true, children: "termchat could not start" }),
+      /* @__PURE__ */ jsx12(Text12, { children: phase.message }),
+      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "ctrl+c to quit" })
     ] });
   }
-  return /* @__PURE__ */ jsx11(Main, { store: phase.store, width: columns, height, quit });
+  return /* @__PURE__ */ jsx12(Main, { store: phase.store, width: columns, height, quit });
 }
 function Main({ store, width, height, quit }) {
   const version = useStoreVersion(store);
-  const [chatId, setChatId] = useState8(null);
-  const [dialog, setDialog] = useState8(null);
-  const [panel, setPanel] = useState8(null);
-  const [selectedKey, setSelectedKey] = useState8(null);
-  const [drafts, setDrafts] = useState8(/* @__PURE__ */ new Map());
-  const [history, setHistory] = useState8([]);
-  useEffect6(() => {
+  const [chatId, setChatId] = useState9(null);
+  const [dialog, setDialog] = useState9(null);
+  const [panel, setPanel] = useState9(null);
+  const [selectedKey, setSelectedKey] = useState9(null);
+  const [drafts, setDrafts] = useState9(/* @__PURE__ */ new Map());
+  const [history, setHistory] = useState9([]);
+  useEffect7(() => {
     void checkForUpdate().then((v) => v && store.setUpdateAvailable(v));
   }, [store]);
-  useEffect6(() => {
+  useEffect7(() => {
     mouse.on("focus", (f) => store.setFocused(f));
     return () => void mouse.removeAllListeners("focus");
   }, [store]);
@@ -5295,7 +5480,7 @@ function Main({ store, width, height, quit }) {
   const bodyHeight = height - 2;
   let body;
   if (chatId) {
-    body = /* @__PURE__ */ jsx11(
+    body = /* @__PURE__ */ jsx12(
       Chat,
       {
         store,
@@ -5314,9 +5499,9 @@ function Main({ store, width, height, quit }) {
       chatId
     );
   } else if (panel) {
-    body = /* @__PURE__ */ jsx11(Panel, { text: panel, width, height: bodyHeight, onClose: () => setPanel(null) });
+    body = /* @__PURE__ */ jsx12(Panel, { text: panel, width, height: bodyHeight, onClose: () => setPanel(null) });
   } else {
-    body = /* @__PURE__ */ jsx11(
+    body = /* @__PURE__ */ jsx12(
       ChatList,
       {
         store,
@@ -5330,14 +5515,14 @@ function Main({ store, width, height, quit }) {
       }
     );
   }
-  return /* @__PURE__ */ jsxs11(Box11, { flexDirection: "column", width, height, children: [
-    /* @__PURE__ */ jsx11(Header, { store, width }),
+  return /* @__PURE__ */ jsxs12(Box12, { flexDirection: "column", width, height, children: [
+    /* @__PURE__ */ jsx12(Header, { store, width }),
     body
   ] });
 }
 
 // src/cli.tsx
-import { jsx as jsx12 } from "react/jsx-runtime";
+import { jsx as jsx13 } from "react/jsx-runtime";
 var HELP = `termchat \u2013 end-to-end encrypted chat for your local network
 
 Usage: termchat [options]
@@ -5392,7 +5577,7 @@ Update failed. ${installHint(res.output) ?? "See the npm output above."}
 `);
   return 1;
 }
-function main() {
+async function main() {
   let values;
   let positionals;
   try {
@@ -5447,10 +5632,29 @@ ${HELP}`);
     process.exit(1);
   }
   const paths = resolvePaths(values.home);
+  let lock;
+  try {
+    const got = await acquireLock(paths.lock, paths.socket);
+    if (!("release" in got)) {
+      process.stdout.write("termchat is already open in another window.\n");
+      process.exit(0);
+    }
+    lock = got;
+  } catch (err) {
+    process.stderr.write(`Couldn't start termchat: ${err.message}
+`);
+    process.exit(1);
+  }
+  try {
+    await startInstanceServer(paths.socket);
+  } catch {
+  }
   let restored = false;
   const restore = () => {
     if (restored) return;
     restored = true;
+    lock.release();
+    if (process.platform !== "win32") fs8.rmSync(paths.socket, { force: true });
     process.stdout.write(MOUSE_OFF + SHOW_CURSOR + ALT_SCREEN_OFF);
   };
   process.stdout.write(ALT_SCREEN_ON + MOUSE_ON);
@@ -5466,7 +5670,7 @@ termchat crashed: ${err instanceof Error ? err.stack ?? err.message : String(err
   process.on("unhandledRejection", crash);
   for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0));
   const app = render(
-    /* @__PURE__ */ jsx12(Root, { paths, options: { port, discovery: !values["no-discovery"], debug: values.debug } }),
+    /* @__PURE__ */ jsx13(Root, { paths, options: { port, discovery: !values["no-discovery"], debug: values.debug } }),
     { exitOnCtrlC: false, patchConsole: true, stdin: new MouseFilterStdin(process.stdin) }
   );
   app.waitUntilExit().then(
@@ -5493,6 +5697,6 @@ async function start() {
 `);
     }
   }
-  main();
+  await main();
 }
 void start();
