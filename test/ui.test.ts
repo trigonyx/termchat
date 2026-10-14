@@ -5,6 +5,7 @@ import { parseAddress, registry } from '../src/commands/builtin.js';
 import { parseCommand, tokenize } from '../src/commands/parse.js';
 import type { AppStore } from '../src/core/store.js';
 import { VERSION } from '../src/core/version.js';
+import { Banner, bannerCompact, bannerHeight, LOGO, LOGO_SMALL } from '../src/ui/components/Banner.js';
 import { Header } from '../src/ui/components/Header.js';
 import { cleanPaste, edit, layoutEditor } from '../src/ui/editor.js';
 import { plainPreview, renderMarkdown } from '../src/ui/markdown.js';
@@ -93,5 +94,24 @@ describe('header', () => {
       expect(strip(lastFrame() ?? '')).toContain(`termchat  v${VERSION}`);
       unmount();
     }
+  });
+});
+
+describe('banner', () => {
+  it('shows the big logo where it fits and the small one in narrow terminals', () => {
+    for (const [width, compact, logo] of [
+      [100, false, LOGO],
+      [60, true, LOGO_SMALL],
+    ] as const) {
+      const { lastFrame, unmount } = render(createElement(Banner, { width, compact, animate: false }));
+      const frame = strip(lastFrame() ?? '');
+      for (const line of logo) expect(frame).toContain(line.trimEnd());
+      expect(frame).toContain('end-to-end encrypted chat');
+      expect(frame.split('\n')).toHaveLength(bannerHeight(compact));
+      unmount();
+    }
+    expect(bannerCompact(120, 40)).toBe(false);
+    expect(bannerCompact(79, 40)).toBe(true);
+    expect(bannerCompact(120, 15)).toBe(true);
   });
 });

@@ -720,6 +720,11 @@ export class AppStore {
     this.changed();
   }
 
+  /** False while the terminal window is in the background (if the terminal reports focus). */
+  get isFocused(): boolean {
+    return this.focused;
+  }
+
   private sendPresence(id: string): void {
     this.network.get(id)?.send({ t: 'presence', away: !this.focused });
   }

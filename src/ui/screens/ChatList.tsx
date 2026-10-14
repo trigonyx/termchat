@@ -4,6 +4,7 @@ import { registry } from '../../commands/builtin.js';
 import type { DiscoveredPeer } from '../../core/discovery.js';
 import type { AppStore, ChatEntry } from '../../core/store.js';
 import type { Actions } from '../actions.js';
+import { Banner, bannerCompact, bannerHeight } from '../components/Banner.js';
 import { CommandMenu, menuHeight } from '../components/CommandMenu.js';
 import { Dialog, dialogHeight, type DialogSpec } from '../components/Dialog.js';
 import { Footer } from '../components/Footer.js';
@@ -220,7 +221,10 @@ export function ChatList({ store, width, height, actions, dialog, selectedKey, o
     : commandMode
       ? inputBoxHeight(editor, width) + menuHeight(cmd.items.length)
       : 0;
-  const bodyHeight = Math.max(3, height - bottom - 1);
+  const compact = bannerCompact(width, height);
+  // in very short terminals the chats need the rows more than the logo does
+  const banner = height - bannerHeight(compact) - 1 >= 8 ? bannerHeight(compact) : 0;
+  const bodyHeight = Math.max(3, height - banner - bottom - 1);
 
   const lines: Line[] = [];
   const section = (title: string, list: Entry[], showEmpty = false) => {
@@ -254,6 +258,7 @@ export function ChatList({ store, width, height, actions, dialog, selectedKey, o
 
   return (
     <Box flexDirection="column" width={width} height={height}>
+      {banner ? <Banner width={width} compact={compact} animate={store.isFocused && !dialog && !commandMode} /> : null}
       <Box flexDirection="column" height={bodyHeight} paddingX={1} overflow="hidden">
         {entries.length === 0 ? (
           <EmptyState store={store} />

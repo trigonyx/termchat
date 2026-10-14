@@ -273,3 +273,39 @@ export function effectTime(mode: EffectsMode, now: number, since: number): numbe
   const t = Math.max(0, now - since);
   return mode === 'brief' ? Math.min(t, ANIM_MS) : t;
 }
+
+// ───────────── The logo's glint ─────────────
+
+/** ms the logo's glint takes to cross it (same as keyrace's and termdrop's banner) */
+export const LOGO_SWEEP = 900;
+/** half width of the glint in columns */
+const LOGO_HALF = 4;
+
+/**
+ * Color of column `col` (of `width`) at time `t` ms after the glint started. It moves left to
+ * right and leans with the rows (`row` shifts it), so it looks like a glint on metal.
+ */
+export function logoShineColor(base: RGB, col: number, row: number, width: number, t: number): RGB {
+  const u = t / LOGO_SWEEP;
+  if (u < 0 || u >= 1) return base;
+  const center = (width + 2 * LOGO_HALF + 6) * u - LOGO_HALF - 6 + row;
+  const strength = Math.max(0, 1 - Math.abs(col + 0.5 - center) / LOGO_HALF);
+  return mix(base, WHITE, strength * 0.85);
+}
+
+/** Paints one line of the logo for frame `t` (< 0 or ≥ LOGO_SWEEP = resting, plain color). */
+export function logoLine(line: string, row: number, width: number, hex: string, t: number): string {
+  if (t < 0 || t >= LOGO_SWEEP) return chalk.hex(hex)(line);
+  const base = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as RGB;
+  let out = '';
+  let col = 0;
+  for (const ch of line) {
+    if (ch === ' ') out += ch;
+    else {
+      const [r, g, b] = logoShineColor(base, col, row, width, t);
+      out += chalk.rgb(Math.round(r), Math.round(g), Math.round(b))(ch);
+    }
+    col++;
+  }
+  return out;
+}
