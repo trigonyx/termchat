@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { fingerprint, publicKeyFromRaw, type Identity } from './identity.js';
-import { cleanName, MAX_TEXT, sanitizeText } from './sanitize.js';
+import { fingerprint, publicKeyFromRaw, type Identity } from 'termcore/net/identity';
+import { cleanName, MAX_TEXT, sanitizeText } from 'termcore/app/sanitize';
 
 export const MAX_MEMBERS = 32;
 export const EVENT_ID_RE = /^[A-Za-z0-9_-]{32}$/;

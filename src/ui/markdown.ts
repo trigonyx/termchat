@@ -4,7 +4,7 @@ import { Lexer, type Token, type Tokens } from 'marked';
 import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 import { closeSpansPerLine, hasTags, sanitizeInput, stripTags, tagMarker } from './effects.js';
-import { c, theme } from './theme.js';
+import { c, theme } from 'termcore/ui/theme';
 
 const ENTITIES: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
 const unescape = (s: string) => s.replace(/&(?:amp|lt|gt|quot|#39);/g, (m) => ENTITIES[m] ?? m);

@@ -1,17 +1,19 @@
 import { Box, Text } from 'ink';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { formatId } from '../../core/identity.js';
+import { formatId } from 'termcore/net/identity';
 import type { AppStore, ChatEntry, ContactView, GroupView } from '../../core/store.js';
 import type { Actions } from '../actions.js';
-import { CommandMenu, menuHeight } from '../components/CommandMenu.js';
-import { Dialog, dialogHeight, type DialogSpec } from '../components/Dialog.js';
-import { Footer } from '../components/Footer.js';
-import { InputBox, inputBoxHeight } from '../components/InputBox.js';
+import { CommandMenu, menuHeight } from 'termcore/ui/components/CommandMenu';
+import { Dialog, dialogHeight, type DialogSpec } from 'termcore/ui/components/Dialog';
+import { Footer } from 'termcore/ui/components/Footer';
+import { InputBox, inputBoxHeight } from 'termcore/ui/components/InputBox';
 import { buildChatLines, MessageList } from '../components/MessageList.js';
-import { edit } from '../editor.js';
-import type { EditorState } from '../editor.js';
-import { lastSeen } from '../format.js';
-import { c, icons, theme } from '../theme.js';
+import { edit } from 'termcore/ui/editor';
+import type { EditorState } from 'termcore/ui/editor';
+import { lastSeen } from 'termcore/ui/format';
+import { presenceDot, statusText } from 'termcore/ui/presence';
+import { c, icons, personHex, theme } from 'termcore/ui/theme';
+import { autoCloseTag } from '../effects.js';
 import { useCommandInput } from './useCommandInput.js';
 
 interface Props {
@@ -84,21 +86,25 @@ function Header({ chat, width }: { chat: ChatEntry; width: number }) {
       </>
     );
   } else {
+    const dot = presenceDot({ online: chat.online, away: chat.inactive, status: chat.status });
     left = (
       <>
-        <Text color={chat.inactive ? theme.warning : chat.online ? theme.success : theme.faint}>
-          {chat.inactive ? icons.away : chat.online ? icons.online : icons.offline}{' '}
+        <Text color={dot.color}>{dot.icon} </Text>
+        <Text bold color={chat.state === 'accepted' ? personHex(chat.id, chat.color) : undefined}>
+          {chat.display}
         </Text>
-        <Text bold>{chat.display}</Text>
         {chat.alias ? <Text color={theme.dim}> ({chat.name})</Text> : null}
         <Text color={theme.faint}> · </Text>
-        {chat.inactive ? (
+        {chat.online && chat.status !== 'available' ? (
+          <Text color={dot.color}>{statusText(chat.status, chat.statusMsg)}</Text>
+        ) : chat.inactive ? (
           <Text color={theme.warning}>inactive</Text>
         ) : chat.online ? (
           <Text color={theme.success}>online</Text>
         ) : (
           <Text color={theme.dim}>{lastSeen(chat.lastSeen)}</Text>
         )}
+        {chat.online && chat.status === 'available' && chat.statusMsg ? <Text color={theme.dim}> · {chat.statusMsg}</Text> : null}
       </>
     );
     right = formatId(chat.id);
@@ -118,6 +124,12 @@ function Header({ chat, width }: { chat: ChatEntry; width: number }) {
       ) : null}
     </Box>
   );
+}
+
+/** Typing "<rgb>" / "<shine …>" completes the closing tag behind the cursor (not for pastes). */
+function completeTag(next: EditorState, input: string): EditorState {
+  const closing = input === '>' ? autoCloseTag(next.value, next.cursor) : null;
+  return closing ? { value: next.value.slice(0, next.cursor) + closing + next.value.slice(next.cursor), cursor: next.cursor } : next;
 }
 
 export function Chat({ store, id, width, height, actions, dialog, editor, setEditor, history, pushHistory, version, onCycle }: Props) {
@@ -263,6 +275,7 @@ export function Chat({ store, id, width, height, actions, dialog, editor, setEdi
             history={history}
             placeholder={placeholder}
             borderColor={editor.value.startsWith('/') ? theme.accent : theme.border}
+            afterType={completeTag}
           />
           <CommandMenu items={cmd.items} selected={cmd.selected} width={width} />
         </>

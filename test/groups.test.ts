@@ -3,11 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { deriveGroup, MAX_MEMBERS, parseEvent, signEvent, verifyEvent, type GroupEvent } from '../src/core/groupEvents.js';
-import { loadOrCreateIdentity, type Identity } from '../src/core/identity.js';
+import { loadOrCreateIdentity, type Identity } from 'termcore/net/identity';
 import { resolvePaths } from '../src/core/paths.js';
 
 function identity(): Identity {
-  return loadOrCreateIdentity(resolvePaths(fs.mkdtempSync(path.join(os.tmpdir(), 'termchat-g-'))));
+  return loadOrCreateIdentity(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'termchat-g-')), 'identity.json'));
 }
 
 /** Small helper that writes a group log like the app would. */

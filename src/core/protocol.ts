@@ -1,12 +1,16 @@
+import { MAX_TEXT, sanitizeText } from 'termcore/app/sanitize';
+import { encodeWire, parseWire as parseBaseWire, type BaseWire, type WireExtension } from 'termcore/friends/wire';
+import { PEER_ID_RE } from 'termcore/net/identity';
 import { EVENT_ID_RE } from './groupEvents.js';
-import { cleanName, MAX_TEXT, sanitizeText } from './sanitize.js';
 
-/** How one side sees the relationship. `outgoing` = "I want to chat with you". */
-export type RelState = 'accepted' | 'outgoing' | 'none';
+export { encodeWire };
+export { reconcile, relStateFor, type ContactState, type RelState } from 'termcore/friends/state';
 
-export type Wire =
-  | { t: 'state'; name: string; state: RelState; port: number }
-  | { t: 'decline' }
+/**
+ * termchat's own messages (the base ones – state, presence, links … – come from termcore):
+ * direct messages with delivery and read receipts, and the group sync.
+ */
+export type ChatWire =
   | { t: 'msg'; id: string; ts: number; text: string }
   | { t: 'ack'; ids: string[] }
   /** read receipt: the recipient had the chat open and their terminal in front */
@@ -16,39 +20,17 @@ export type Wire =
   /** Group events (validated and verified later in groups.ts) */
   | { t: 'gev'; gid: string; evs: unknown[] }
   /** receipt; `by` = relayed on behalf of another member who received the events */
-  | { t: 'gack'; gid: string; ids: string[]; by?: string }
-  /** Terminal in the background (`away`) or back in front */
-  | { t: 'presence'; away: boolean }
-  | { t: 'ping' }
-  | { t: 'pong' }
-  | { t: 'bye' };
+  | { t: 'gack'; gid: string; ids: string[]; by?: string };
+
+export type Wire = BaseWire | ChatWire;
 
 const ID_RE = /^[A-Za-z0-9-]{1,64}$/;
-const REL_STATES: RelState[] = ['accepted', 'outgoing', 'none'];
 /** Keeps a gsync frame well below MAX_FRAME (each id ≈ 35 bytes of JSON). */
 export const MAX_SYNC_IDS = 1200;
 
-/** Strictly validates incoming frames. Anything unexpected yields `null` and is dropped. */
-export function parseWire(buf: Buffer): Wire | null {
-  let o: Record<string, unknown>;
-  try {
-    o = JSON.parse(buf.toString('utf8'));
-  } catch {
-    return null;
-  }
-  if (!o || typeof o !== 'object') return null;
-
+/** Strictly validates termchat's messages. Anything unexpected yields `null` and is dropped. */
+export function parseChatWire(o: Record<string, unknown>): ChatWire | null {
   switch (o.t) {
-    case 'state': {
-      const port = Number(o.port);
-      if (!REL_STATES.includes(o.state as RelState)) return null;
-      return {
-        t: 'state',
-        name: cleanName(o.name),
-        state: o.state as RelState,
-        port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 0,
-      };
-    }
     case 'msg': {
       if (typeof o.id !== 'string' || !ID_RE.test(o.id)) return null;
       if (typeof o.text !== 'string' || o.text.length > MAX_TEXT) return null;
@@ -78,50 +60,17 @@ export function parseWire(buf: Buffer): Wire | null {
       if (typeof o.gid !== 'string' || !EVENT_ID_RE.test(o.gid)) return null;
       if (!Array.isArray(o.ids) || o.ids.length > 500) return null;
       const ids = o.ids.filter((id): id is string => typeof id === 'string' && EVENT_ID_RE.test(id));
-      const by = typeof o.by === 'string' && /^[A-Z2-7]{20}$/.test(o.by) ? o.by : undefined;
+      const by = typeof o.by === 'string' && PEER_ID_RE.test(o.by) ? o.by : undefined;
       return { t: 'gack', gid: o.gid, ids, ...(by ? { by } : {}) };
     }
-    case 'presence':
-      return typeof o.away === 'boolean' ? { t: 'presence', away: o.away } : null;
-    case 'decline':
-    case 'ping':
-    case 'pong':
-    case 'bye':
-      return { t: o.t };
     default:
       return null;
   }
 }
 
-export function encodeWire(msg: Wire): Buffer {
-  return Buffer.from(JSON.stringify(msg), 'utf8');
-}
+export const WIRE: WireExtension<ChatWire> = { parse: parseChatWire };
 
-export type ContactState = 'accepted' | 'outgoing' | 'incoming' | 'declined' | 'blocked';
-
-/**
- * Reconciles our view with the peer's once connected or whenever a state changes.
- * Result: our new state (or `null` = no contact).
- */
-export function reconcile(mine: ContactState | null, theirs: RelState): ContactState | null {
-  const peerWants = theirs === 'accepted' || theirs === 'outgoing';
-  switch (mine) {
-    case 'blocked':
-      return 'blocked';
-    case 'accepted':
-    case 'outgoing':
-      // Both want it → contact established. If the peer removed us, it becomes a request again.
-      return peerWants ? 'accepted' : 'outgoing';
-    case 'incoming':
-      return peerWants ? 'incoming' : null;
-    case 'declined':
-      return peerWants ? 'incoming' : 'declined';
-    case null:
-      return peerWants ? 'incoming' : null;
-  }
-}
-
-/** What we tell the peer about our view. */
-export function relStateFor(state: ContactState | null): RelState {
-  return state === 'accepted' || state === 'outgoing' ? state : 'none';
+/** Everything that can arrive on a friend session. */
+export function parseWire(buf: Buffer): Wire | null {
+  return parseBaseWire(buf, WIRE);
 }

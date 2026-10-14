@@ -1,7 +1,7 @@
 import net from 'node:net';
 import { copyToClipboard } from '../core/clipboard.js';
 import { exportChat } from '../core/export.js';
-import { formatId } from '../core/identity.js';
+import { formatId } from 'termcore/net/identity';
 import {
   compareVersions,
   fetchLatestVersion,
@@ -14,7 +14,8 @@ import {
   staleInstallHint,
 } from '../core/update.js';
 import { VERSION } from '../core/version.js';
-import { DEFAULT_PORT } from '../core/network.js';
+import { statusText } from 'termcore/ui/presence';
+import { APP } from '../app.js';
 import type { GroupView } from '../core/store.js';
 import { EFFECTS_MODES, type EffectsMode } from '../ui/effects.js';
 import { codeBlocks } from '../ui/markdown.js';
@@ -53,7 +54,7 @@ export function parseAddress(input: string): { host: string; port: number } {
   const m = /^\[?([^\]]+?)\]?(?::(\d{1,5}))?$/.exec(input.trim());
   if (!m) throw new Error(`Invalid address: ${input}`);
   const host = m[1]!;
-  const port = m[2] ? Number(m[2]) : DEFAULT_PORT;
+  const port = m[2] ? Number(m[2]) : APP.tcpPort;
   if (port < 1 || port > 65535) throw new Error(`Invalid port: ${m[2]}`);
   if (!net.isIP(host) && !/^[a-z0-9.-]+$/i.test(host)) throw new Error(`Invalid address: ${input}`);
   return { host, port };
@@ -96,14 +97,18 @@ export const builtinCommands: Command[] = [
     run(ctx) {
       const me = ctx.store.me;
       const addr = me.ips.length ? me.ips.map((ip) => `\`${ip}:${me.port}\``).join(', ') : 'no network';
-      ctx.ui.print(`**${me.name}** · ID \`${formatId(me.id, true)}\`\nReachable at ${addr}`);
+      const status = statusText(me.status, me.statusMsg);
+      ctx.ui.print(
+        `**${me.name}** · ID \`${formatId(me.id, true)}\`${status ? ` · ${status}` : ''}\nReachable at ${addr}\n` +
+          '_Name, ID and contacts are shared by termchat, keyrace and termdrop (~/.termhub)._',
+      );
     },
   },
   {
     name: 'name',
     usage: '<new name>',
     minArgs: 1,
-    description: 'Change your display name',
+    description: 'Change your display name (in all apps)',
     scope: 'global',
     run(ctx, _args, rest) {
       const name = ctx.store.setName(rest);
@@ -268,7 +273,7 @@ export const builtinCommands: Command[] = [
         `### ${c.display}${c.alias ? ` _(calls themselves ${c.name})_` : ''}`,
         '',
         `- **ID** \`${formatId(c.id, true)}\``,
-        `- **Status** ${c.inactive ? 'inactive' : c.online ? 'online' : 'offline'} · ${STATE_LABEL[c.state] ?? c.state}`,
+        `- **Status** ${c.inactive ? 'inactive' : c.online ? 'online' : 'offline'}${c.online && statusText(c.status, c.statusMsg) ? ` · ${statusText(c.status, c.statusMsg)}` : ''} · ${STATE_LABEL[c.state] ?? c.state}`,
         `- **Address** ${c.lastIp ? `\`${c.lastIp}:${c.lastPort ?? '?'}\`` : 'unknown'}`,
         `- **Safety code** ${code ? `\`${code}\`` : 'not connected yet'}`,
         '',
@@ -375,7 +380,7 @@ export const builtinCommands: Command[] = [
   {
     name: 'effects',
     usage: '[nonstop|brief|off]',
-    description: '<rgb>/<shine>: animate nonstop, for 8 seconds (default) or not at all',
+    description: '<rgb>/<shine>: animate nonstop, for 8 seconds (default) or not at all (logos too, all apps)',
     scope: 'global',
     run(ctx, args) {
       const arg = args[0]?.toLowerCase();
@@ -390,7 +395,7 @@ export const builtinCommands: Command[] = [
     name: 'notifications',
     aliases: ['notify'],
     usage: '[on|off]',
-    description: 'Desktop notifications for messages while termchat is in the background',
+    description: 'Desktop notifications while the app is in the background (all apps)',
     scope: 'global',
     run(ctx, args) {
       const arg = args[0]?.toLowerCase();

@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { deriveGroup, parseEvent, signEvent, verifyEvent, type GroupEvent, type GroupState } from './groupEvents.js';
-import type { Identity } from './identity.js';
+import type { Identity } from 'termcore/net/identity';
 import type { Paths } from './paths.js';
 import { MAX_SYNC_IDS, type Wire } from './protocol.js';
-import { cleanName, MAX_TEXT, sanitizeText } from './sanitize.js';
-import { appendJsonl, readJson, readJsonl, writeJsonAtomic } from './storage.js';
+import { cleanName, MAX_TEXT, sanitizeText } from 'termcore/app/sanitize';
+import { appendJsonl, readJson, readJsonl, writeJsonAtomic } from 'termcore/app/storage';
 
 /** Max. JSON size of one `gev` batch – stays well below MAX_FRAME. */
 const BATCH_BYTES = 40_000;

@@ -17,16 +17,18 @@ import {
   staleInstallHint,
 } from './core/update.js';
 import { REPO_CONFIGURED, VERSION } from './core/version.js';
-import { acquireLock, startInstanceServer, type Lock } from './core/instance.js';
+import { acquireLock, startInstanceServer, type Lock } from 'termcore/app/instance';
 import { Root } from './ui/App.js';
-import { MOUSE_OFF, MOUSE_ON, MouseFilterStdin } from './ui/mouse.js';
+import { Hub, migrationNotice } from 'termcore/store/hub';
+import { MOUSE_OFF, MOUSE_ON, MouseFilterStdin } from 'termcore/ui/mouse';
 
 const HELP = `termchat – end-to-end encrypted chat for your local network
 
 Usage: termchat [options]
        termchat update   Install the latest version from GitHub
 
-  --home <dir>      Data directory (default: ~/.termchat, or $TERMCHAT_HOME)
+  --home <dir>      Data directory (default: ~/.termhub shared by all apps plus
+                    ~/.termchat; with --home: <dir> and <dir>/termchat; or $TERMHUB_HOME)
   --port <port>     TCP port (default: 5050, falls back if taken)
   --no-discovery    Don't search the network automatically
   --debug           Write a connection log to <home>/termchat.log
@@ -135,6 +137,17 @@ async function main(): Promise<void> {
     process.stderr.write(`Couldn't start termchat: ${(err as Error).message}\n`);
     process.exit(1);
   }
+  // first start of 2.x: identity, name and contacts of all apps move into ~/.termhub
+  let notice: string | undefined;
+  try {
+    const report = Hub.prepare(paths.hub);
+    if (report.migrated) notice = migrationNotice(report.friends);
+  } catch (err) {
+    lock.release();
+    process.stderr.write(`Couldn't read your profile in ${paths.hub.dir}: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+
   try {
     await startInstanceServer(paths.socket);
   } catch {
@@ -163,7 +176,7 @@ async function main(): Promise<void> {
   for (const sig of ['SIGTERM', 'SIGHUP'] as const) process.on(sig, () => process.exit(0));
 
   const app = render(
-    <Root paths={paths} options={{ port, discovery: !values['no-discovery'], debug: values.debug }} />,
+    <Root paths={paths} options={{ port, discovery: !values['no-discovery'], debug: values.debug }} notice={notice} />,
     { exitOnCtrlC: false, patchConsole: true, stdin: new MouseFilterStdin(process.stdin) as unknown as NodeJS.ReadStream },
   );
   app.waitUntilExit().then(

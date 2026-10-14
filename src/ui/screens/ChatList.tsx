@@ -1,19 +1,20 @@
 import { Box, Text, useInput } from 'ink';
 import { useRef, useState } from 'react';
 import { registry } from '../../commands/builtin.js';
-import type { DiscoveredPeer } from '../../core/discovery.js';
+import type { DiscoveredPeer } from 'termcore/net/discovery';
 import type { AppStore, ChatEntry } from '../../core/store.js';
 import type { Actions } from '../actions.js';
 import { Banner, bannerCompact, bannerHeight } from '../components/Banner.js';
-import { CommandMenu, menuHeight } from '../components/CommandMenu.js';
-import { Dialog, dialogHeight, type DialogSpec } from '../components/Dialog.js';
-import { Footer } from '../components/Footer.js';
-import { InputBox, inputBoxHeight } from '../components/InputBox.js';
-import { cleanPaste, edit, emptyEditor, type EditorState } from '../editor.js';
-import { shortTime } from '../format.js';
+import { CommandMenu, menuHeight } from 'termcore/ui/components/CommandMenu';
+import { Dialog, dialogHeight, type DialogSpec } from 'termcore/ui/components/Dialog';
+import { Footer } from 'termcore/ui/components/Footer';
+import { InputBox, inputBoxHeight } from 'termcore/ui/components/InputBox';
+import { cleanPaste, edit, emptyEditor, type EditorState } from 'termcore/ui/editor';
+import { shortTime } from 'termcore/ui/format';
 import { plainPreview } from '../markdown.js';
-import { useWheel } from '../mouse.js';
-import { icons, theme } from '../theme.js';
+import { useWheel } from 'termcore/ui/mouse';
+import { icons, theme, personHex } from 'termcore/ui/theme';
+import { presenceDot } from 'termcore/ui/presence';
 import { useCommandInput } from './useCommandInput.js';
 
 type Entry =
@@ -258,7 +259,7 @@ export function ChatList({ store, width, height, actions, dialog, selectedKey, o
 
   return (
     <Box flexDirection="column" width={width} height={height}>
-      {banner ? <Banner width={width} compact={compact} animate={store.isFocused && !dialog && !commandMode} /> : null}
+      {banner ? <Banner width={width} compact={compact} animate={store.isFocused && !dialog && !commandMode} mode={store.effects} /> : null}
       <Box flexDirection="column" height={bodyHeight} paddingX={1} overflow="hidden">
         {entries.length === 0 ? (
           <EmptyState store={store} />
@@ -341,19 +342,21 @@ function Row({ entry, selected, width, store }: { entry: Entry; selected: boolea
           {icons.group}
         </Text>
       ) : (
-        <Text color={c.inactive ? theme.warning : c.online ? theme.success : theme.faint}>
-          {c.inactive ? icons.away : c.online ? icons.online : icons.offline}
+        <Text color={presenceDot({ online: c.online, away: c.inactive, status: c.status }).color}>
+          {presenceDot({ online: c.online, away: c.inactive, status: c.status }).icon}
         </Text>
       )}
     </Box>
   );
   const time = c.last ? shortTime(c.last.ts) : '';
+  // a contact's own color (their profile color, else one from their id)
+  const nameColor = selected ? theme.accent : !isGroup && c.state === 'accepted' ? personHex(c.id, c.color) : undefined;
   return (
     <Box>
       {pointer}
       {dot}
       <Box width={nameWidth} flexShrink={0}>
-        <Text bold={selected || c.unread > 0} color={selected ? theme.accent : undefined} wrap="truncate-end">
+        <Text bold={selected || c.unread > 0} color={nameColor} wrap="truncate-end">
           {c.display}
         </Text>
       </Box>
@@ -367,7 +370,7 @@ function Row({ entry, selected, width, store }: { entry: Entry; selected: boolea
       </Box>
       <Box width={5} flexShrink={0} justifyContent="flex-end">
         {c.unread > 0 ? (
-          <Text backgroundColor={theme.accent} color="#1E1E1E" bold>
+          <Text backgroundColor={theme.accent} color={theme.onAccent} bold>
             {` ${c.unread > 99 ? '99+' : c.unread} `}
           </Text>
         ) : null}

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Paths } from './paths.js';
-import { appendJsonl, readJsonl } from './storage.js';
+import { appendJsonl, readJsonl } from 'termcore/app/storage';
 
 /**
  * My messages: pending → delivered (on their device) → read (they had the chat open and in front).
@@ -121,6 +121,29 @@ export class HistoryStore {
   last(peerId: string): ChatMessage | undefined {
     const list = this.get(peerId);
     return list[list.length - 1];
+  }
+
+  /**
+   * A contact has a new id (the move to ~/.termhub): their chat moves along. If there's
+   * already a chat under the new id, both are kept – `get` skips messages it already has.
+   */
+  rekey(oldId: string, newId: string): void {
+    const from = this.file(oldId);
+    if (!fs.existsSync(from)) return;
+    const to = this.file(newId);
+    if (fs.existsSync(to)) {
+      fs.appendFileSync(to, fs.readFileSync(from));
+      fs.rmSync(from);
+    } else {
+      fs.renameSync(from, to);
+    }
+    this.cache.delete(oldId);
+    this.cache.delete(newId);
+  }
+
+  /** Is there a chat with this id? */
+  hasChat(peerId: string): boolean {
+    return fs.existsSync(this.file(peerId));
   }
 
   delete(peerId: string): void {

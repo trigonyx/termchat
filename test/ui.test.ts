@@ -2,12 +2,12 @@ import { render } from 'ink-testing-library';
 import { createElement } from 'react';
 import { describe, expect, it } from 'vitest';
 import { parseAddress, registry } from '../src/commands/builtin.js';
-import { parseCommand, tokenize } from '../src/commands/parse.js';
+import { parseCommand, tokenize } from 'termcore/ui/commands/parse';
 import type { AppStore } from '../src/core/store.js';
 import { VERSION } from '../src/core/version.js';
 import { Banner, bannerCompact, bannerHeight, LOGO, LOGO_SMALL } from '../src/ui/components/Banner.js';
-import { Header } from '../src/ui/components/Header.js';
-import { cleanPaste, edit, layoutEditor } from '../src/ui/editor.js';
+import { Header } from 'termcore/ui/components/Header';
+import { cleanPaste, edit, layoutEditor } from 'termcore/ui/editor';
 import { plainPreview, renderMarkdown } from '../src/ui/markdown.js';
 
 const strip = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, '');
@@ -90,7 +90,9 @@ describe('header', () => {
       updateAvailable: null,
     } as unknown as AppStore;
     for (const width of [100, 40]) {
-      const { lastFrame, unmount } = render(createElement(Header, { store, width }));
+      const { lastFrame, unmount } = render(
+        createElement(Header, { app: 'termchat', version: VERSION, me: store.me, address: '10.0.0.2:5050', online: store.onlineCount(), onlineLabel: () => 'connected', width }),
+      );
       expect(strip(lastFrame() ?? '')).toContain(`termchat  v${VERSION}`);
       unmount();
     }

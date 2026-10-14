@@ -3,9 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import stringWidth from 'string-width';
 import type { ChatItem, Note } from '../../core/store.js';
 import { ANIM_MS, applyEffects, effectTime, hasEffects, type EffectsMode } from '../effects.js';
-import { clock, dayLabel, startOfDay } from '../format.js';
+import { clock, dayLabel, startOfDay } from 'termcore/ui/format';
 import { renderMarkdown } from '../markdown.js';
-import { c, icons, senderColor } from '../theme.js';
+import { c, icons, senderColor } from 'termcore/ui/theme';
 
 const GROUP_GAP = 5 * 60_000;
 const INDENT = '  ';

@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import stringWidth from 'string-width';
-import { theme } from './theme.js';
+import { mix, WHITE, type RGB } from 'termcore/ui/effects';
+import { theme } from 'termcore/ui/theme';
 
 /**
  * Animated text tags: <rgb>…</rgb> and <shine color="gold">…</shine>.
@@ -37,16 +38,15 @@ const NAMED: Record<string, string> = {
   white: 'f2f2f2',
   gray: '9a9a9a',
   grey: '9a9a9a',
-  accent: theme.accent.slice(1),
 };
 
-/** Color name or #rgb/#rrggbb → 6 hex digits. Unknown values fall back to the accent color. */
+/** Color name or #rgb/#rrggbb → 6 hex digits. Unknown values (and `accent`) fall back to the accent color. */
 export function parseColor(input: string | undefined): string {
   const v = (input ?? '').trim().toLowerCase();
   if (NAMED[v]) return NAMED[v];
   const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/.exec(v);
   if (m) return m[1]!.length === 3 ? [...m[1]!].map((ch) => ch + ch).join('') : m[1]!;
-  return NAMED.accent!;
+  return theme.accent.slice(1).toLowerCase();
 }
 
 const encodeColor = (hex: string) => [...hex].map((d) => String.fromCharCode(0xfe00 + parseInt(d, 16))).join('');
@@ -102,8 +102,6 @@ export function closeSpansPerLine(lines: string[]): string[] {
   });
 }
 
-type RGB = [number, number, number];
-
 function hslToRgb(h: number, s: number, l: number): RGB {
   const a = s * Math.min(l, 1 - l);
   const f = (n: number) => {
@@ -113,8 +111,6 @@ function hslToRgb(h: number, s: number, l: number): RGB {
   return [f(0) * 255, f(8) * 255, f(4) * 255];
 }
 
-const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-const WHITE: RGB = [255, 255, 255];
 
 const RAINBOW_PERIOD = 30; // columns until the colors repeat
 const RAINBOW_SPEED = 9; // columns per second
@@ -258,54 +254,7 @@ export function insertTag(state: { value: string; cursor: number }, tag: TagSpec
 
 // ───────────── Playback ─────────────
 
-export type EffectsMode = 'nonstop' | 'brief' | 'off';
-export const EFFECTS_MODES: EffectsMode[] = ['nonstop', 'brief', 'off'];
-
-/**
- * How long effects play in `brief` mode before they rest. 8000 ms is also a moment where
- * the shimmer has just finished, so the resting frame shows shine in its plain color.
- */
-export const ANIM_MS = 8000;
-
-/** Animation time (ms) for the frame to draw; `since` = when the effects came into view. */
-export function effectTime(mode: EffectsMode, now: number, since: number): number {
-  if (mode === 'off') return ANIM_MS;
-  const t = Math.max(0, now - since);
-  return mode === 'brief' ? Math.min(t, ANIM_MS) : t;
-}
-
-// ───────────── The logo's glint ─────────────
-
-/** ms the logo's glint takes to cross it (same as keyrace's and termdrop's banner) */
-export const LOGO_SWEEP = 900;
-/** half width of the glint in columns */
-const LOGO_HALF = 4;
-
-/**
- * Color of column `col` (of `width`) at time `t` ms after the glint started. It moves left to
- * right and leans with the rows (`row` shifts it), so it looks like a glint on metal.
- */
-export function logoShineColor(base: RGB, col: number, row: number, width: number, t: number): RGB {
-  const u = t / LOGO_SWEEP;
-  if (u < 0 || u >= 1) return base;
-  const center = (width + 2 * LOGO_HALF + 6) * u - LOGO_HALF - 6 + row;
-  const strength = Math.max(0, 1 - Math.abs(col + 0.5 - center) / LOGO_HALF);
-  return mix(base, WHITE, strength * 0.85);
-}
-
-/** Paints one line of the logo for frame `t` (< 0 or ≥ LOGO_SWEEP = resting, plain color). */
-export function logoLine(line: string, row: number, width: number, hex: string, t: number): string {
-  if (t < 0 || t >= LOGO_SWEEP) return chalk.hex(hex)(line);
-  const base = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as RGB;
-  let out = '';
-  let col = 0;
-  for (const ch of line) {
-    if (ch === ' ') out += ch;
-    else {
-      const [r, g, b] = logoShineColor(base, col, row, width, t);
-      out += chalk.rgb(Math.round(r), Math.round(g), Math.round(b))(ch);
-    }
-    col++;
-  }
-  return out;
-}
+// The animation modes (/effects) are shared by all apps (settings.json → animations).
+export { ANIM_MS, effectTime } from 'termcore/ui/effects';
+export type { Animations as EffectsMode } from 'termcore/store/files';
+export { ANIMATIONS as EFFECTS_MODES } from 'termcore/store/files';
