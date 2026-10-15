@@ -1,6 +1,6 @@
 {
   "name": "termchat",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   "repository": {
     "type": "git",

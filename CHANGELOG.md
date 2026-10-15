@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.0 – 2026-10-15
+
+- termhub is here: the README says how to get it – it installs, opens and updates the apps
+- Friends' status is kept in the shared list, so termhub shows it; the welcome screen mentions termhub (termcore)
+
 ## 2.0.0 – 2026-10-14
 
 - Shared core termcore and one profile for termchat, keyrace and termdrop

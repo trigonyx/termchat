@@ -100,6 +100,32 @@ var installSpec = (app) => `https://github.com/${app.repo}/tarball/main`;
 var installCmd = (app) => `npm i -g ${installSpec(app)}`;
 
 // ../termcore/src/app/update.ts
+function npmCommand(env = process.env) {
+  if (env.TERMHUB_NPM) return { cmd: env.TERMHUB_NPM, shell: false };
+  const win = process.platform === "win32";
+  return { cmd: win ? "npm.cmd" : "npm", shell: win };
+}
+function runNpm(args, opts = {}) {
+  return new Promise((resolve) => {
+    const { cmd, shell } = npmCommand();
+    let output = "";
+    const take = (d) => {
+      const s = String(d);
+      output += s;
+      opts.onOutput?.(s);
+    };
+    try {
+      const p = spawn(cmd, args, { stdio: opts.inherit ? "inherit" : ["ignore", "pipe", "pipe"], shell });
+      p.stdout?.on("data", take);
+      p.stderr?.on("data", take);
+      p.on("error", (err) => resolve({ ok: false, output: `${output}
+${err.message}` }));
+      p.on("close", (code) => resolve({ ok: code === 0, output }));
+    } catch (err) {
+      resolve({ ok: false, output: err.message });
+    }
+  });
+}
 var VERSION_RE = /^\d+\.\d+\.\d+$/;
 var PERMISSION_RE = /EACCES|EPERM|permission denied/i;
 function compareVersions(a, b) {
@@ -195,48 +221,58 @@ Update it there with \`git pull && npm install\`, or install the release with \`
       return "local";
     }
   }
-  function npmInstall(spec, inherit, target) {
+  function npmInstall(spec, inherit, target, onOutput) {
     const dir = appDir2();
     const args = target === "global" ? ["install", "-g", "--prefer-online", spec] : (
       // own cache: after `sudo npm ...`, ~/.npm often contains root-owned files
       ["install", "--prefix", dir, "--cache", path4.join(dir, ".npm-cache"), "--prefer-online", "--no-audit", "--no-fund", spec]
     );
-    return new Promise((resolve) => {
-      const win = process.platform === "win32";
-      let output = "";
-      try {
-        if (target === "local") fs.mkdirSync(dir, { recursive: true });
-        const p = spawn(win ? "npm.cmd" : "npm", args, {
-          stdio: inherit ? "inherit" : ["ignore", "pipe", "pipe"],
-          shell: win
-        });
-        p.stdout?.on("data", (d) => output += d);
-        p.stderr?.on("data", (d) => output += d);
-        p.on("error", (err) => resolve({ ok: false, output: `${output}
-${err.message}` }));
-        p.on("close", (code) => resolve({ ok: code === 0, output }));
-      } catch (err) {
-        resolve({ ok: false, output: err.message });
-      }
-    });
+    try {
+      if (target === "local") fs.mkdirSync(dir, { recursive: true });
+    } catch (err) {
+      return Promise.resolve({ ok: false, output: err.message });
+    }
+    return runNpm(args, { inherit, onOutput });
   }
-  async function runInstall2({ inherit, version }) {
+  async function runInstall2({
+    inherit,
+    version,
+    target: forced,
+    onOutput
+  }) {
     if (!REPO_CONFIGURED2 && !env("INSTALL_SPEC")) return { ok: false, output: "The GitHub repo is not set in package.json yet." };
     const attempt = async (target2) => {
       if (version && !env("INSTALL_SPEC")) {
-        const res2 = await npmInstall(specFor(version), inherit, target2);
+        const res2 = await npmInstall(specFor(version), inherit, target2, onOutput);
         if (res2.ok || PERMISSION_RE.test(res2.output)) return res2;
       }
-      return npmInstall(specFor(), inherit, target2);
+      return npmInstall(specFor(), inherit, target2, onOutput);
     };
-    const target = installTarget2();
+    const target = forced ?? installTarget2();
     const res = await attempt(target);
-    if (!res.ok && target === "global" && !isRoot() && PERMISSION_RE.test(res.output)) return attempt("local");
+    if (!res.ok && target === "global" && !isRoot() && PERMISSION_RE.test(res.output)) {
+      onOutput?.(`
+No permission for npm's global folder \u2013 installing into ${appDir2()} instead.
+`);
+      return attempt("local");
+    }
     return res;
+  }
+  async function runUninstall({ target, inherit = false, onOutput }) {
+    if (target === "global") return runNpm(["rm", "-g", name], { inherit, onOutput });
+    try {
+      fs.rmSync(appDir2(), { recursive: true, force: true });
+      const msg = `Removed ${appDir2()}
+`;
+      onOutput?.(msg);
+      return { ok: true, output: msg };
+    } catch (err) {
+      return { ok: false, output: err.message };
+    }
   }
   function installedVersion2(script = process.argv[1] ?? "") {
     return new Promise((resolve) => {
-      execFile(process.execPath, [script, "--version"], { timeout: 15e3 }, (err, stdout) => {
+      execFile(process.execPath, [script, "--version"], { timeout: 15e3, env: { ...process.env, [`${P}_NO_UPDATE_CHECK`]: "1" } }, (err, stdout) => {
         const version = new RegExp(`${name} (\\d+\\.\\d+\\.\\d+)`).exec(String(stdout))?.[1];
         resolve(err || !version ? null : version);
       });
@@ -265,6 +301,7 @@ ${err.message}` }));
     newerLocalInstall: newerLocalInstall2,
     installTarget: installTarget2,
     runInstall: runInstall2,
+    runUninstall,
     installedVersion: installedVersion2,
     staleInstallHint: staleInstallHint2,
     installHint: installHint2
@@ -274,7 +311,7 @@ ${err.message}` }));
 // package.json
 var package_default = {
   name: "termchat",
-  version: "2.0.0",
+  version: "2.1.0",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -517,7 +554,7 @@ async function startInstanceServer(socket, onRequest) {
 }
 
 // src/ui/App.tsx
-import { Box as Box12, Text as Text13, useApp, useInput as useInput6 } from "ink";
+import { Box as Box13, Text as Text14, useApp, useInput as useInput6 } from "ink";
 import { useCallback, useEffect as useEffect7, useMemo as useMemo2, useRef as useRef6, useState as useState9 } from "react";
 
 // src/commands/builtin.ts
@@ -999,6 +1036,8 @@ function parseFriend(raw) {
     lastSeen: num(o.lastSeen),
     lastActivity: num(o.lastActivity) ?? now,
     createdAt: num(o.createdAt) ?? now,
+    status: isStatus(o.status) && o.status !== "available" ? o.status : void 0,
+    statusMsg: cleanStatusMsg(o.statusMsg),
     apps: parseApps(o.apps)
   });
 }
@@ -1625,6 +1664,8 @@ function mergeFriends(a, b, id = a.id) {
   if (Object.keys(ports).length) out.ports = ports;
   const lastSeen2 = max(a.lastSeen, b.lastSeen);
   if (lastSeen2 !== void 0) out.lastSeen = lastSeen2;
+  if (recent.status) out.status = recent.status;
+  if (recent.statusMsg) out.statusMsg = recent.statusMsg;
   if (Object.keys(apps).length) out.apps = apps;
   return out;
 }
@@ -1641,7 +1682,7 @@ function mergePeers(a, b, id = a.id) {
 }
 
 // ../termcore/src/friends/book.ts
-var SHARED = /* @__PURE__ */ new Set(["publicKey", "name", "alias", "state", "color", "lastIp", "lastSeen", "lastActivity", "createdAt"]);
+var SHARED = /* @__PURE__ */ new Set(["publicKey", "name", "alias", "state", "color", "lastIp", "lastSeen", "lastActivity", "createdAt", "status", "statusMsg"]);
 function displayName(c2) {
   return c2.alias || c2.name;
 }
@@ -1946,7 +1987,8 @@ var Dialer = class {
   }
   target(id) {
     const p = this.d.discovery()?.find(id);
-    if (p) return { ip: p.ip, port: p.port, discovered: true };
+    const port = p && (this.d.portOf ? this.d.portOf(p) : p.port);
+    if (p && port) return { ip: p.ip, port, discovered: true };
     const last = this.d.lastAddress(id);
     return last ? { ...last, discovered: false } : null;
   }
@@ -3335,11 +3377,12 @@ var Hub = class {
   static profileName(paths) {
     return parseProfile(readJson(paths.profile, null))?.name ?? null;
   }
-  /** Creates identity (if there's none yet) and profile on first launch. */
-  static createProfile(paths, name) {
+  /** Creates identity (if there's none yet) and profile on first launch (termhub also asks for a color). */
+  static createProfile(paths, name, color) {
     const identity = loadOrCreateIdentity(paths.identity);
     const prev = parseProfile(readJson(paths.profile, null));
-    writeJsonAtomic(paths.profile, { ...prev ?? { v: 1, status: "available" }, name: cleanName(name) });
+    const hex = normalizeColor(color);
+    writeJsonAtomic(paths.profile, { ...prev ?? { v: 1, status: "available" }, name: cleanName(name), ...hex ? { color: hex } : {} });
     return identity;
   }
   /** Follows file changes by the other apps. */
@@ -3419,7 +3462,7 @@ function applyLinks(hub, appHome, rekey) {
   return applied;
 }
 function migrationNotice(friends) {
-  return `Your profile and ${friends === 1 ? "1 friend" : `${friends} friends`} moved to ~/.termhub \u2013 shared by termchat, keyrace and termdrop`;
+  return `Your profile and ${friends === 1 ? "1 friend" : `${friends} friends`} moved to ~/.termhub \u2013 shared by termchat, keyrace, termdrop and termhub`;
 }
 
 // ../termcore/src/friends/wire.ts
@@ -3513,7 +3556,8 @@ var FriendNet = class {
       },
       alsoWants: (id) => opts.hooks.alsoWants?.(id) ?? false,
       log: (l) => this.log(l),
-      unreachable: (id, info) => this.event({ kind: "unreachable", id, who: this.peerName(id), ...info })
+      unreachable: (id, info) => this.event({ kind: "unreachable", id, who: this.peerName(id), ...info }),
+      portOf: (p) => this.ownPort(p)
     });
     this.network.on("session", (s) => this.onSession(s));
     this.network.on("purpose", (c2) => opts.hooks.purpose ? opts.hooks.purpose(c2) : c2.fs.destroy());
@@ -3663,6 +3707,17 @@ var FriendNet = class {
     if (c2) return displayName(c2);
     return this.peerBook.get(id)?.name ?? "Unknown";
   }
+  /**
+   * Our app's TCP port on a discovered peer's computer: the one it announced if it is our app,
+   * else from the list of apps running there (`apps`). termhub sees people through every app.
+   */
+  ownPort(p) {
+    return p.app === this.app.name ? p.port : p.apps?.[this.app.name];
+  }
+  /** The discovered peer that is (or was, see links) `id`. */
+  discovered(id) {
+    return this.discoveryRef?.find(id);
+  }
   /** People on the network running this app who aren't friends (an old id they announce counts). */
   nearby() {
     return [...this.discoveryRef?.peers.values() ?? []].filter((p) => !this.contacts.get(p.id) && !(p.was ?? []).some((w) => this.contacts.get(w))).sort((a, b) => a.name.localeCompare(b.name));
@@ -3699,7 +3754,9 @@ var FriendNet = class {
       return result;
     }
     if (!p) throw new Error("They are no longer nearby");
-    this.contacts.upsert(id, { publicKey: "", name: p.name, state: "outgoing", lastIp: p.ip, lastPort: p.port });
+    const port = this.ownPort(p);
+    this.contacts.upsert(id, { publicKey: "", name: p.name, state: "outgoing", lastIp: p.ip, ...port ? { lastPort: port } : {} });
+    this.contacts.setPorts(id, { ...p.apps, [p.app]: p.port });
     this.connect(id);
     this.changed();
     return "sent";
@@ -3822,12 +3879,15 @@ var FriendNet = class {
     if (!d) return;
     const seen = [];
     for (const p of d.peers.values()) {
+      const port = this.ownPort(p);
       for (const id of [p.id, ...p.was ?? []]) {
         const c2 = this.contacts.get(id);
-        if (c2 && (c2.lastIp !== p.ip || c2.lastPort !== p.port)) this.contacts.upsert(id, { lastIp: p.ip, lastPort: p.port });
-        if (c2 && p.apps) this.contacts.setPorts(id, p.apps);
+        if (c2 && (c2.lastIp !== p.ip || port && c2.lastPort !== port)) {
+          this.contacts.upsert(id, { lastIp: p.ip, ...port ? { lastPort: port } : {} });
+        }
+        if (c2 && (p.apps || p.app !== this.app.name)) this.contacts.setPorts(id, { ...p.apps, [p.app]: p.port });
         const known = this.peerBook.get(id);
-        if (known && (known.lastIp !== p.ip || known.lastPort !== p.port)) this.peerBook.update(id, { lastIp: p.ip, lastPort: p.port });
+        if (known && (known.lastIp !== p.ip || port && known.lastPort !== port)) this.peerBook.update(id, { lastIp: p.ip, ...port ? { lastPort: port } : {} });
         seen.push(id);
       }
     }
@@ -3973,6 +4033,7 @@ var FriendNet = class {
         const next = { away, status: status ?? "available", ...msg ? { msg } : {}, extra };
         if (JSON.stringify(next) === JSON.stringify(this.presenceMap.get(id))) return;
         this.presenceMap.set(id, next);
+        this.rememberStatus(id, next);
         this.opts.hooks.presence?.(id, next);
         this.changed();
         return;
@@ -3985,6 +4046,14 @@ var FriendNet = class {
         if (this.contacts.get(id)?.state === "blocked") return;
         this.opts.hooks.message(s, m);
     }
+  }
+  /** Keeps a friend's status in friends.json, so termhub and our other apps know it without a session. */
+  rememberStatus(id, p) {
+    const c2 = this.contacts.get(id);
+    if (!c2) return;
+    const status = p.status === "available" ? void 0 : p.status;
+    if ((c2.status ?? void 0) === status && c2.statusMsg === p.msg) return;
+    this.contacts.upsert(id, { status, statusMsg: p.msg });
   }
   /** Their links: an old id we know is them now. Only links to the session's own key count. */
   onLinks(s, links) {
@@ -6039,11 +6108,28 @@ var MouseFilterStdin = class extends PassThrough {
     super();
     this.source = source;
     source.setEncoding("utf8");
-    source.on("data", (chunk) => this.feed(chunk));
+    source.on("data", this.onData);
+    source.resume();
   }
   isTTY = true;
   pending = "";
   timer = null;
+  onData = (chunk) => this.feed(chunk);
+  /**
+   * Stops reading the terminal: the real stdin is paused and no longer fed in here. termhub
+   * does this before another app takes over the terminal, so no keystroke goes to both.
+   */
+  detach() {
+    this.source.off("data", this.onData);
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = "";
+    try {
+      this.source.setRawMode(false);
+    } catch {
+    }
+    this.source.pause();
+  }
   feed(chunk) {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
@@ -6393,7 +6479,7 @@ function PromptDialog({ spec, width }) {
   ] });
 }
 function PickDialog({ spec, width }) {
-  const [cursor, setCursor] = useState3(0);
+  const [cursor, setCursor] = useState3(() => Math.max(0, spec.options.findIndex((o) => o.id === spec.opts?.initial)));
   const [chosen, setChosen] = useState3(() => new Set(spec.opts?.preselect ?? []));
   const n = spec.options.length;
   useWheel((dir) => setCursor((c2) => Math.max(0, Math.min(n - 1, c2 + dir))));
@@ -7230,58 +7316,123 @@ function EmptyState({ store }) {
 }
 
 // ../termcore/src/ui/components/Onboarding.tsx
-import { Box as Box11, Text as Text12, useInput as useInput5 } from "ink";
+import { Box as Box12, Text as Text13, useInput as useInput5 } from "ink";
 import { useState as useState8 } from "react";
-import { Fragment as Fragment6, jsx as jsx12, jsxs as jsxs11 } from "react/jsx-runtime";
-function Onboarding({ logo, tagline, width, create, onDone, question = "What should your friends see you as?" }) {
+
+// ../termcore/src/ui/components/Swatches.tsx
+import { Box as Box11, Text as Text12 } from "ink";
+import { jsx as jsx12, jsxs as jsxs11 } from "react/jsx-runtime";
+var SWATCH_WIDTH = 4;
+function Swatches({ colors, selected, width, active = true }) {
+  const perRow = Math.max(1, Math.floor(width / SWATCH_WIDTH));
+  const rows = [];
+  colors.forEach((c2, index) => {
+    const r = Math.floor(index / perRow);
+    (rows[r] ??= []).push({ hex: c2.hex, index });
+  });
+  return /* @__PURE__ */ jsx12(Box11, { flexDirection: "column", children: rows.map((row, r) => /* @__PURE__ */ jsx12(Text12, { children: row.map(({ hex, index }) => {
+    const sel = index === selected;
+    const bracket = sel ? active ? theme.accent : theme.dim : void 0;
+    return /* @__PURE__ */ jsxs11(Text12, { children: [
+      /* @__PURE__ */ jsx12(Text12, { color: bracket, children: sel ? "[" : " " }),
+      /* @__PURE__ */ jsx12(Text12, { color: hex, children: "\u2588\u2588" }),
+      /* @__PURE__ */ jsx12(Text12, { color: bracket, children: sel ? "]" : " " })
+    ] }, index);
+  }) }, r)) });
+}
+
+// ../termcore/src/ui/components/Onboarding.tsx
+import { Fragment as Fragment6, jsx as jsx13, jsxs as jsxs12 } from "react/jsx-runtime";
+function Onboarding({ logo, tagline, width, create, onDone, question = "What should your friends see you as?", colors }) {
   const [editor, setEditor] = useState8(emptyEditor);
+  const [name, setName] = useState8(null);
+  const [colorIndex, setColorIndex] = useState8(0);
   const [created, setCreated] = useState8(null);
   const [error, setError] = useState8(null);
   useInput5((_i, key) => key.return && onDone(), { isActive: created !== null });
-  const submit = (value) => {
-    const name = value.trim();
-    if (!name) {
-      setError("Please enter a name.");
-      return;
-    }
+  const finish2 = (n, color) => {
     try {
-      setCreated({ name, id: create(name) });
+      setCreated({ name: n, id: create(n, color), ...color ? { color } : {} });
     } catch (err) {
       setError(`Could not create profile: ${err.message}`);
     }
   };
+  const submit = (value) => {
+    const n = value.trim();
+    if (!n) {
+      setError("Please enter a name.");
+      return;
+    }
+    if (colors?.length) setName(n);
+    else finish2(n);
+  };
+  const picking = name !== null && created === null && !!colors?.length;
+  useInput5(
+    (input, key) => {
+      const n = colors.length;
+      if (key.leftArrow || input === "h") setColorIndex((i) => (i - 1 + n) % n);
+      else if (key.rightArrow || input === "l" || key.tab) setColorIndex((i) => (i + 1) % n);
+      else if (key.escape) setName(null);
+      else if (key.return) finish2(name, colors[colorIndex].hex);
+    },
+    { isActive: picking }
+  );
   const boxWidth = Math.min(64, width - 4);
-  return /* @__PURE__ */ jsxs11(Box11, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [
-    logo.map((l, i) => /* @__PURE__ */ jsx12(Text12, { color: theme.accent, children: l }, i)),
-    /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: tagline }),
-    /* @__PURE__ */ jsx12(Text12, { children: " " }),
-    created ? /* @__PURE__ */ jsxs11(Fragment6, { children: [
-      /* @__PURE__ */ jsxs11(Text12, { children: [
+  let body;
+  if (created) {
+    body = /* @__PURE__ */ jsxs12(Fragment6, { children: [
+      /* @__PURE__ */ jsxs12(Text13, { children: [
         "Welcome, ",
-        /* @__PURE__ */ jsx12(Text12, { bold: true, children: created.name }),
+        /* @__PURE__ */ jsx13(Text13, { bold: true, color: created.color, children: created.name }),
         "!"
       ] }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "Your personal ID has been created:" }),
-      /* @__PURE__ */ jsxs11(Text12, { color: theme.accent, bold: true, children: [
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "Your personal ID has been created:" }),
+      /* @__PURE__ */ jsxs12(Text13, { color: theme.accent, bold: true, children: [
         "  ",
         formatId(created.id, true)
       ] }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "It's tied to a secret key on this device. That's how your friends recognize" }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "you \u2013 even if your name or IP address changes. termchat, keyrace and termdrop" }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "share it, along with your friends. Every connection is end-to-end encrypted." }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsxs11(Text12, { children: [
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "It's tied to a secret key on this device. That's how your friends recognize" }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "you \u2013 even if your name or IP address changes. termchat, keyrace, termdrop and" }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "termhub share it, along with your friends. Every connection is end-to-end encrypted." }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsxs12(Text13, { children: [
         "Press ",
-        /* @__PURE__ */ jsx12(Text12, { color: theme.accent, children: "enter" }),
+        /* @__PURE__ */ jsx13(Text13, { color: theme.accent, children: "enter" }),
         " to continue"
       ] })
-    ] }) : /* @__PURE__ */ jsxs11(Fragment6, { children: [
-      /* @__PURE__ */ jsx12(Text12, { bold: true, children: question }),
-      /* @__PURE__ */ jsx12(Text12, { color: theme.dim, children: "You can change it later with /name." }),
-      /* @__PURE__ */ jsx12(Text12, { children: " " }),
-      /* @__PURE__ */ jsx12(
+    ] });
+  } else if (picking) {
+    const current = colors[colorIndex];
+    body = /* @__PURE__ */ jsxs12(Fragment6, { children: [
+      /* @__PURE__ */ jsx13(Text13, { bold: true, children: "Pick your color" }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "Friends see your name in it, in every app. You can change it later." }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Swatches, { colors, selected: colorIndex, width: boxWidth }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsxs12(Text13, { children: [
+        "  ",
+        /* @__PURE__ */ jsx13(Text13, { bold: true, color: current.hex, children: name }),
+        /* @__PURE__ */ jsxs12(Text13, { color: theme.dim, children: [
+          " \xB7 ",
+          current.name
+        ] })
+      ] }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "\u2190\u2192 choose \xB7 enter confirm \xB7 esc back to the name" }),
+      error ? /* @__PURE__ */ jsx13(Text13, { color: theme.error, children: error }) : null
+    ] });
+  } else {
+    body = /* @__PURE__ */ jsxs12(Fragment6, { children: [
+      /* @__PURE__ */ jsx13(Text13, { bold: true, children: question }),
+      /* @__PURE__ */ jsxs12(Text13, { color: theme.dim, children: [
+        "You can change it later",
+        colors ? " in termhub" : " with /name",
+        "."
+      ] }),
+      /* @__PURE__ */ jsx13(Text13, { children: " " }),
+      /* @__PURE__ */ jsx13(
         InputBox,
         {
           state: editor,
@@ -7297,13 +7448,19 @@ function Onboarding({ logo, tagline, width, create, onDone, question = "What sho
           borderColor: theme.accent
         }
       ),
-      error ? /* @__PURE__ */ jsx12(Text12, { color: theme.error, children: error }) : null
-    ] })
+      error ? /* @__PURE__ */ jsx13(Text13, { color: theme.error, children: error }) : null
+    ] });
+  }
+  return /* @__PURE__ */ jsxs12(Box12, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [
+    logo.map((l, i) => /* @__PURE__ */ jsx13(Text13, { color: theme.accent, children: l }, i)),
+    /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: tagline }),
+    /* @__PURE__ */ jsx13(Text13, { children: " " }),
+    body
   ] });
 }
 
 // src/ui/App.tsx
-import { jsx as jsx13, jsxs as jsxs12 } from "react/jsx-runtime";
+import { jsx as jsx14, jsxs as jsxs13 } from "react/jsx-runtime";
 function Root({
   paths,
   options,
@@ -7344,7 +7501,7 @@ function Root({
   }, [phase.name]);
   const height = Math.max(10, rows - 1);
   if (phase.name === "onboarding") {
-    return /* @__PURE__ */ jsx13(
+    return /* @__PURE__ */ jsx14(
       Onboarding,
       {
         logo: LOGO_SMALL,
@@ -7357,16 +7514,16 @@ function Root({
     );
   }
   if (phase.name === "starting") {
-    return /* @__PURE__ */ jsx13(Box12, { paddingX: 2, paddingY: 1, children: /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "Starting termchat \u2026" }) });
+    return /* @__PURE__ */ jsx14(Box13, { paddingX: 2, paddingY: 1, children: /* @__PURE__ */ jsx14(Text14, { color: theme.dim, children: "Starting termchat \u2026" }) });
   }
   if (phase.name === "error") {
-    return /* @__PURE__ */ jsxs12(Box12, { paddingX: 2, paddingY: 1, flexDirection: "column", children: [
-      /* @__PURE__ */ jsx13(Text13, { color: theme.error, bold: true, children: "termchat could not start" }),
-      /* @__PURE__ */ jsx13(Text13, { children: phase.message }),
-      /* @__PURE__ */ jsx13(Text13, { color: theme.dim, children: "ctrl+c to quit" })
+    return /* @__PURE__ */ jsxs13(Box13, { paddingX: 2, paddingY: 1, flexDirection: "column", children: [
+      /* @__PURE__ */ jsx14(Text14, { color: theme.error, bold: true, children: "termchat could not start" }),
+      /* @__PURE__ */ jsx14(Text14, { children: phase.message }),
+      /* @__PURE__ */ jsx14(Text14, { color: theme.dim, children: "ctrl+c to quit" })
     ] });
   }
-  return /* @__PURE__ */ jsx13(Main, { store: phase.store, width: columns, height, quit });
+  return /* @__PURE__ */ jsx14(Main, { store: phase.store, width: columns, height, quit });
 }
 function Main({ store, width, height, quit }) {
   const version = useStoreVersion(store);
@@ -7467,7 +7624,7 @@ function Main({ store, width, height, quit }) {
   const bodyHeight = height - 2;
   let body;
   if (chatId) {
-    body = /* @__PURE__ */ jsx13(
+    body = /* @__PURE__ */ jsx14(
       Chat,
       {
         store,
@@ -7486,9 +7643,9 @@ function Main({ store, width, height, quit }) {
       chatId
     );
   } else if (panel) {
-    body = /* @__PURE__ */ jsx13(Panel, { text: panel, width, height: bodyHeight, onClose: () => setPanel(null), render: (t, w) => renderMarkdown(t, w).map(stripMarkers) });
+    body = /* @__PURE__ */ jsx14(Panel, { text: panel, width, height: bodyHeight, onClose: () => setPanel(null), render: (t, w) => renderMarkdown(t, w).map(stripMarkers) });
   } else {
-    body = /* @__PURE__ */ jsx13(
+    body = /* @__PURE__ */ jsx14(
       ChatList,
       {
         store,
@@ -7502,8 +7659,8 @@ function Main({ store, width, height, quit }) {
       }
     );
   }
-  return /* @__PURE__ */ jsxs12(Box12, { flexDirection: "column", width, height, children: [
-    /* @__PURE__ */ jsx13(
+  return /* @__PURE__ */ jsxs13(Box13, { flexDirection: "column", width, height, children: [
+    /* @__PURE__ */ jsx14(
       Header,
       {
         app: "termchat",
@@ -7521,7 +7678,7 @@ function Main({ store, width, height, quit }) {
 }
 
 // src/cli.tsx
-import { jsx as jsx14 } from "react/jsx-runtime";
+import { jsx as jsx15 } from "react/jsx-runtime";
 var HELP = `termchat \u2013 end-to-end encrypted chat for your local network
 
 Usage: termchat [options]
@@ -7680,7 +7837,7 @@ termchat crashed: ${err instanceof Error ? err.stack ?? err.message : String(err
   process.on("unhandledRejection", crash);
   for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0));
   const app = render(
-    /* @__PURE__ */ jsx14(Root, { paths, options: { port, discovery: !values["no-discovery"], debug: values.debug }, notice }),
+    /* @__PURE__ */ jsx15(Root, { paths, options: { port, discovery: !values["no-discovery"], debug: values.debug }, notice }),
     { exitOnCtrlC: false, patchConsole: true, stdin: new MouseFilterStdin(process.stdin) }
   );
   app.waitUntilExit().then(
