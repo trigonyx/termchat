@@ -59,8 +59,15 @@ moves the identities, names and contact lists of all three apps into `~/.termhub
 backup in `~/.termhub/legacy`). Friends who updated too recognize you everywhere under that one ID through a
 signed link – **ask your friends to update too.** An older termchat still sees you as before.
 
-**termhub** – one app to see all your friends and where they're online, set your profile color and status,
-and start chats, races and transfers from one place – is coming soon.
+**termhub** – the hub of the suite: your profile (name, color, status), all your friends and in which app
+they're online right now, the settings all apps share, an encrypted backup of your identity – and it installs,
+opens and updates termchat, keyrace and termdrop for you:
+
+```sh
+npm i -g https://github.com/trigonyx/termhub/tarball/main
+```
+
+See [termhub](https://github.com/trigonyx/termhub).
 
 ## How it works
 
@@ -71,7 +78,7 @@ and start chats, races and transfers from one place – is coming soon.
 - **Ticks:** `◷` not sent yet (your contact is offline – it's delivered automatically once you're both online again) · gray `✓` delivered, but not read yet · green `✓✓` read (they had the chat open with their terminal in front).
 - **Group chats:** press `g`, name the group and tick the contacts to invite. Invites show up under "Requests". Everyone in the group can invite people and rename it; only the creator can remove members; anyone can leave.
 - **Security:** every connection is authenticated and encrypted (X25519 + Ed25519 + ChaCha20-Poly1305, using only Node's built-in crypto). `/whois` shows a safety code. Compare it once in person, and you can rule out anyone sitting in the middle.
-- **Profile color and status:** contacts who picked a profile color show up in it – in the list, the chat header and group chats (otherwise in a color from their ID) – and their status (busy, do not disturb, a short message) appears next to their name. You set yours in termhub (coming soon); until then you can edit `~/.termhub/profile.json`. In **do not disturb**, messages arrive as usual but quietly: no pop-up, no desktop notification.
+- **Profile color and status:** contacts who picked a profile color show up in it – in the list, the chat header and group chats (otherwise in a color from their ID) – and their status (busy, do not disturb, a short message) appears next to their name. You set yours in [termhub](https://github.com/trigonyx/termhub) (Profile tab). In **do not disturb**, messages arrive as usual but quietly: no pop-up, no desktop notification.
 
 ## Usage
 
@@ -178,7 +185,7 @@ keyrace or termdrop with the same `--home` are the same person, with the same co
 
 ## Data
 
-Readable only by you. Shared by termchat, keyrace and termdrop, in `~/.termhub/`:
+Readable only by you. Shared by termchat, keyrace, termdrop and termhub, in `~/.termhub/`:
 
 - `identity.json`: your secret key. **Don't share it.** If it's lost, you get a new ID.
 - `profile.json`: your name, profile color and status
