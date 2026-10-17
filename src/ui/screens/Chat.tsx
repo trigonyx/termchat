@@ -11,7 +11,7 @@ import { buildChatLines, MessageList } from '../components/MessageList.js';
 import { edit } from 'termcore/ui/editor';
 import type { EditorState } from 'termcore/ui/editor';
 import { lastSeen } from 'termcore/ui/format';
-import { presenceDot, statusText } from 'termcore/ui/presence';
+import { elsewhereDot, elsewhereText, presenceDot, statusText } from 'termcore/ui/presence';
 import { c, icons, personHex, theme } from 'termcore/ui/theme';
 import { autoCloseTag } from '../effects.js';
 import { useCommandInput } from './useCommandInput.js';
@@ -86,7 +86,7 @@ function Header({ chat, width }: { chat: ChatEntry; width: number }) {
       </>
     );
   } else {
-    const dot = presenceDot({ online: chat.online, away: chat.inactive, status: chat.status });
+    const dot = !chat.online && chat.elsewhere.length ? elsewhereDot() : presenceDot({ online: chat.online, away: chat.inactive, status: chat.status });
     left = (
       <>
         <Text color={dot.color}>{dot.icon} </Text>
@@ -101,6 +101,8 @@ function Header({ chat, width }: { chat: ChatEntry; width: number }) {
           <Text color={theme.warning}>inactive</Text>
         ) : chat.online ? (
           <Text color={theme.success}>online</Text>
+        ) : chat.elsewhere.length ? (
+          <Text color={theme.dim}>{elsewhereText(chat.elsewhere)} – messages reach them there</Text>
         ) : (
           <Text color={theme.dim}>{lastSeen(chat.lastSeen)}</Text>
         )}

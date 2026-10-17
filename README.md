@@ -149,6 +149,7 @@ To send a message that starts with `/`, type `//`.
 
 ## On macOS
 
+- **Friends without termchat open:** a contact who only has termhub, keyrace or termdrop open shows up as `◌ in termhub`. Messages to them go there as a notice (`termchat · Alice: hi`, counted on termchat's badge in termhub), and when they open termchat the messages are already in the chat. Your copy turns ✓ once their termchat confirms it. Messages that arrive in termchat also show up in your other open apps.
 - **Notifications:** on macOS, a system banner (sender + preview) appears when a message arrives while the terminal window is in the background. Toggle with `/notifications on|off`. The banner position is set by macOS (System Settings → Notifications), and it needs a terminal that reports focus (Terminal.app, iTerm2).
 - **Scrolling:** mouse wheel or two-finger swipe on the trackpad (also `↑/↓`; `shift+fn+↑/↓` pages in Terminal.app).
 - **Selecting text:** just click and drag – termchat doesn't capture the mouse, only the wheel is turned into ↑/↓ by the terminal (alternate scroll mode). `alt+↑/↓` recalls input history. While `<rgb>`/`<shine>` are animating the screen redraws and the terminal drops the selection – wait until they rest (8 s) or use `/effects off`.

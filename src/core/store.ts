@@ -3,6 +3,8 @@ import { MAX_TEXT, sanitizeText } from 'termcore/app/sanitize';
 import { Toasts, type NoteKind, type Toast as BaseToast } from 'termcore/app/toasts';
 import { displayName, type ContactOf } from 'termcore/friends/book';
 import { appendLog, FriendNet, type FriendEvent, type Msg } from 'termcore/friends/net';
+import { noticeLine } from 'termcore/friends/notices';
+import type { InNotice } from 'termcore/store/files';
 import type { Status } from 'termcore/friends/profile';
 import type { DiscoveredPeer, DiscoveryOptions } from 'termcore/net/discovery';
 import type { Session } from 'termcore/net/peer';
@@ -15,7 +17,7 @@ import type { GroupEvent, GroupState } from './groupEvents.js';
 import { GroupManager, type MyGroupStatus } from './groups.js';
 import { HistoryStore, type ChatMessage } from './history.js';
 import type { Paths } from './paths.js';
-import { WIRE, type ChatWire } from './protocol.js';
+import { parseChatWire, WIRE, type ChatWire } from './protocol.js';
 
 export type { NoteKind };
 
@@ -56,6 +58,8 @@ export interface ContactView extends Contact {
   online: boolean;
   /** connected, but their terminal is in the background */
   inactive: boolean;
+  /** not online in termchat, but in these apps of theirs (messages reach them there as notices) */
+  elsewhere: string[];
   unread: number;
   /** their status (only while connected) */
   status: Status;
@@ -126,6 +130,10 @@ const gidOf = (chatId: string) => chatId.slice(GROUP_PREFIX.length);
 /** Escapes names before putting them into Markdown notes. */
 const md = (s: string) => s.replace(/[\\`*_~#>\[\]|]/g, (ch) => `\\${ch}`);
 
+/** How long a notice about a message is worth delivering to someone who doesn't have termchat open. */
+const NOTICE_TTL = 3 * 24 * 3600_000;
+const preview = (text: string, max: number) => text.replace(/\s+/g, ' ').trim().slice(0, max);
+
 /**
  * Central app logic: contacts and presence (termcore's FriendNet on the shared ~/.termhub),
  * chat histories and groups. Exposes a subscribable state to the UI and also runs without a
@@ -143,6 +151,9 @@ export class AppStore {
   private listeners = new Set<() => void>();
   private notifyQueued = false;
   private activeChat: string | null = null;
+  private started = false;
+  /** taking notices: what they carry was shown in another app already */
+  private replaying = false;
   version = 0;
   /** Newer version on GitHub (checked by the UI at launch), shown in the header. */
   updateAvailable: string | null = null;
@@ -168,7 +179,11 @@ export class AppStore {
         log: (l) => this.log(l),
         event: (e) => this.onEvent(e),
         message: (s, m) => this.onMessage(s, m),
-        session: (s) => this.groups.onSessionUp(s.peerId),
+        session: (s) => {
+          // they have termchat open: the messages themselves get there now
+          for (const n of this.net.notices.outgoing()) if (n.to === s.peerId && n.app === 'termchat') this.net.dropNotice(n.id, n.to);
+          this.groups.onSessionUp(s.peerId);
+        },
         offline: (id) => this.groups.onSessionDown(id),
         stateMessage: (s, m) => {
           // group members who aren't contacts: remember how to reach them
@@ -187,6 +202,7 @@ export class AppStore {
         knowsId: (id) => this.history.hasChat(id),
         rekey: (oldId, newId) => this.history.rekey(oldId, newId),
         settings: (s) => this.applySettings(s),
+        takeNotices: (list) => this.takeNotices(list),
       },
     });
     this.applySettings(this.hub.settings.get());
@@ -232,6 +248,7 @@ export class AppStore {
 
   async start(): Promise<void> {
     await this.net.start();
+    this.started = true;
     this.changed();
   }
 
@@ -255,8 +272,21 @@ export class AppStore {
     this.notifyQueued = true;
     queueMicrotask(() => {
       this.notifyQueued = false;
+      this.syncWaiting();
       for (const fn of this.listeners) fn();
     });
+  }
+
+  /** Unread messages, for termhub's badge. */
+  private syncWaiting(): void {
+    if (!this.started) return;
+    let n = 0;
+    for (const c of this.contacts.all()) if (c.state === 'accepted') n += c.unread ?? 0;
+    for (const g of this.groups.list()) {
+      const status = this.groups.myStatus(g.gid);
+      if (status === 'member') n += this.groups.metaOf(g.gid).unread;
+    }
+    this.net.setWaiting(n);
   }
 
   private applySettings(s: Settings): void {
@@ -301,6 +331,7 @@ export class AppStore {
       display: displayName(c),
       online,
       inactive: online && (p?.away ?? false),
+      elsewhere: online ? [] : this.net.elsewhere(id),
       unread: c.unread ?? 0,
       status: p?.status ?? 'available',
       ...(p?.msg ? { statusMsg: p.msg } : {}),
@@ -547,6 +578,8 @@ export class AppStore {
             'on Windows, allow Node.js for public networks; on macOS, allow incoming connections for node.',
           'error',
         );
+      case 'notice':
+        return this.showToast(noticeLine(e.notice));
       case 'linked':
         // notes and the open chat follow the contact to the new id
         for (const map of [this.notes, this.viewCutoffs] as Map<string, unknown>[]) {
@@ -573,8 +606,11 @@ export class AppStore {
     const msg: ChatMessage = { id: crypto.randomUUID(), from: 'me', text, ts: Date.now(), status: 'pending' };
     this.history.add(id, msg);
     this.contacts.upsert(id, { lastActivity: msg.ts });
-    if (c.state === 'accepted') this.network.get(id)?.send({ t: 'msg', id: msg.id, ts: msg.ts, text: msg.text });
-    else this.net.tryDial(id);
+    if (c.state !== 'accepted') this.net.tryDial(id);
+    else if (!this.network.get(id)?.send({ t: 'msg', id: msg.id, ts: msg.ts, text: msg.text })) {
+      // termchat isn't open on their side: their other apps tell them (and termchat picks it up there)
+      this.net.sendNotice(id, { id: msg.id, kind: 'msg', title: this.net.name, body: preview(text, 120), msg: { t: 'msg', id: msg.id, ts: msg.ts, text }, ttlMs: NOTICE_TTL });
+    }
     this.changed();
     return { ok: true };
   }
@@ -689,7 +725,23 @@ export class AppStore {
 
   sendGroupMessage(chatId: string, raw: string): { ok: boolean; error?: string } {
     try {
-      this.groups.send(gidOf(chatId), raw);
+      const gid = gidOf(chatId);
+      const ev = this.groups.send(gid, raw);
+      // members without termchat open hear about it through their other apps
+      const state = this.groups.get(gid);
+      if (state) {
+        for (const m of state.members.values()) {
+          if (m.id === this.identity.id || m.status !== 'member' || this.contacts.get(m.id)?.state !== 'accepted' || this.isOnline(m.id)) continue;
+          this.net.sendNotice(m.id, {
+            id: ev.id,
+            kind: 'gmsg',
+            title: `#${state.name}`,
+            body: `${this.net.name}: ${preview(ev.data.text ?? '', 100)}`,
+            msg: { t: 'gev', gid, evs: [ev] },
+            ttlMs: NOTICE_TTL,
+          });
+        }
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -698,14 +750,15 @@ export class AppStore {
 
   private onGroupMessage(gid: string, ev: GroupEvent, state: GroupState): void {
     const chatId = groupChatId(gid);
-    const preview = sanitizeText(ev.data.text ?? '').replace(/\s+/g, ' ').slice(0, 60);
-    this.net.notify(`#${state.name}`, `${this.peerName(ev.author, state)}: ${preview}`);
+    const short = preview(sanitizeText(ev.data.text ?? ''), 60);
+    this.net.notify(`#${state.name}`, `${this.peerName(ev.author, state)}: ${short}`);
     if (this.activeChat === chatId) {
       this.groups.markRead(gid);
       return;
     }
+    if (!this.replaying) this.net.noteLocally(ev.author, { id: ev.id, kind: 'gmsg', title: `#${state.name}`, body: `${this.peerName(ev.author, state)}: ${short}` });
     // do not disturb: it arrives (unread), but quietly
-    if (!this.net.dnd) this.showToast(`#${state.name} · ${this.peerName(ev.author, state)}: ${preview}`, 'info', chatId);
+    if (!this.net.dnd) this.showToast(`#${state.name} · ${this.peerName(ev.author, state)}: ${short}`, 'info', chatId);
   }
 
   // ───────────── Presence and notifications ─────────────
@@ -761,10 +814,8 @@ export class AppStore {
           this.net.notify(displayName(c), m.text.replace(/\s+/g, ' ').slice(0, 100));
           this.contacts.mutate(id, (cur) => ({ lastActivity: Date.now(), unread: active ? undefined : (cur?.unread ?? 0) + 1 }));
           // do not disturb: it arrives (unread), but quietly
-          if (!active && !this.net.dnd) {
-            const preview = m.text.replace(/\s+/g, ' ').slice(0, 60);
-            this.showToast(`${displayName(c)}: ${preview}`, 'info', id);
-          }
+          if (!active && !this.replaying) this.net.noteLocally(id, { id: m.id, kind: 'msg', title: displayName(c), body: preview(m.text, 100) });
+          if (!active && !this.net.dnd) this.showToast(`${displayName(c)}: ${preview(m.text, 60)}`, 'info', id);
           this.changed();
         }
         s.send({ t: 'ack', ids: [m.id] });
@@ -782,6 +833,27 @@ export class AppStore {
       case 'gack':
         this.groups.onWire(id, m);
         return;
+    }
+  }
+
+  /**
+   * Notices friends sent while termchat wasn't open (their other apps showed them already): the
+   * messages in them arrive now, as if they came over the network. When the friend's termchat
+   * sends them again later, they're already here.
+   */
+  private takeNotices(list: InNotice[]): void {
+    this.replaying = true;
+    try {
+      for (const n of list) {
+        const m = n.msg ? parseChatWire(n.msg) : null;
+        if (!m || (m.t !== 'msg' && m.t !== 'gev')) continue;
+        // a session that can't send: receipts go out when they're really connected
+        const s = { peerId: n.from, send: () => false } as unknown as Session<Msg<ChatWire>>;
+        if (m.t === 'msg') this.onMessage(s, m);
+        else this.groups.onWire(n.from, m);
+      }
+    } finally {
+      this.replaying = false;
     }
   }
 

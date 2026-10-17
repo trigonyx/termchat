@@ -14,7 +14,7 @@ import {
   staleInstallHint,
 } from '../core/update.js';
 import { VERSION } from '../core/version.js';
-import { statusText } from 'termcore/ui/presence';
+import { elsewhereText, statusText } from 'termcore/ui/presence';
 import { APP } from '../app.js';
 import type { GroupView } from '../core/store.js';
 import { EFFECTS_MODES, type EffectsMode } from '../ui/effects.js';
@@ -273,7 +273,7 @@ export const builtinCommands: Command[] = [
         `### ${c.display}${c.alias ? ` _(calls themselves ${c.name})_` : ''}`,
         '',
         `- **ID** \`${formatId(c.id, true)}\``,
-        `- **Status** ${c.inactive ? 'inactive' : c.online ? 'online' : 'offline'}${c.online && statusText(c.status, c.statusMsg) ? ` · ${statusText(c.status, c.statusMsg)}` : ''} · ${STATE_LABEL[c.state] ?? c.state}`,
+        `- **Status** ${c.inactive ? 'inactive' : c.online ? 'online' : c.elsewhere.length ? elsewhereText(c.elsewhere) : 'offline'}${c.online && statusText(c.status, c.statusMsg) ? ` · ${statusText(c.status, c.statusMsg)}` : ''} · ${STATE_LABEL[c.state] ?? c.state}`,
         `- **Address** ${c.lastIp ? `\`${c.lastIp}:${c.lastPort ?? '?'}\`` : 'unknown'}`,
         `- **Safety code** ${code ? `\`${code}\`` : 'not connected yet'}`,
         '',

@@ -14,7 +14,7 @@ import { shortTime } from 'termcore/ui/format';
 import { plainPreview } from '../markdown.js';
 import { useWheel } from 'termcore/ui/mouse';
 import { icons, theme, personHex } from 'termcore/ui/theme';
-import { presenceDot, statusText } from 'termcore/ui/presence';
+import { elsewhereDot, presenceDot, statusText } from 'termcore/ui/presence';
 import { useCommandInput } from './useCommandInput.js';
 
 type Entry =
@@ -342,8 +342,8 @@ function Row({ entry, selected, width, store }: { entry: Entry; selected: boolea
           {icons.group}
         </Text>
       ) : (
-        <Text color={presenceDot({ online: c.online, away: c.inactive, status: c.status }).color}>
-          {presenceDot({ online: c.online, away: c.inactive, status: c.status }).icon}
+        <Text color={(!c.online && c.elsewhere.length ? elsewhereDot() : presenceDot({ online: c.online, away: c.inactive, status: c.status })).color}>
+          {(!c.online && c.elsewhere.length ? elsewhereDot() : presenceDot({ online: c.online, away: c.inactive, status: c.status })).icon}
         </Text>
       )}
     </Box>
