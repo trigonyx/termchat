@@ -51,6 +51,8 @@ function hubPaths(dir, legacy) {
     peers: path2.join(dir, "peers.json"),
     settings: path2.join(dir, "settings.json"),
     links: path2.join(dir, "links.json"),
+    inbox: path2.join(dir, "inbox.json"),
+    outbox: path2.join(dir, "outbox.json"),
     migration: path2.join(dir, "migration.json"),
     runDir: path2.join(dir, "run"),
     legacyDir: path2.join(dir, "legacy"),
@@ -311,7 +313,7 @@ No permission for npm's global folder \u2013 installing into ${appDir2()} instea
 // package.json
 var package_default = {
   name: "termchat",
-  version: "2.1.0",
+  version: "2.2.0",
   description: "End-to-end encrypted peer-to-peer chat for your local network, right in the terminal.",
   repository: {
     type: "git",
@@ -783,6 +785,8 @@ var icons = {
   pointer: "\u276F",
   online: "\u25CF",
   offline: "\u25CB",
+  /** online, but in another app of the suite */
+  elsewhere: "\u25CC",
   away: "\u25D0",
   busy: "\u25D1",
   dnd: "\u2298",
@@ -836,6 +840,10 @@ function statusText(status, msg) {
   const label = status === "busy" ? "busy" : status === "dnd" ? "do not disturb" : "";
   return [label, msg].filter(Boolean).join(" \xB7 ");
 }
+function elsewhereText(apps) {
+  return apps.length ? `in ${apps.join(" + ")}` : "";
+}
+var elsewhereDot = () => ({ icon: icons.elsewhere, color: theme.dim });
 
 // src/ui/effects.ts
 import chalk3 from "chalk";
@@ -1095,6 +1103,82 @@ function parseLinksFile(raw) {
   const o = raw ?? {};
   const links = (v) => Array.isArray(v) ? v.map(parseLink).filter((l) => l !== null) : [];
   return { v: 1, mine: links(o.mine), known: links(o.known) };
+}
+var MAX_NOTICES = 200;
+var MAX_NOTICE_TTL = 7 * 24 * 36e5;
+var MAX_NOTICE_MSG = 2e4;
+var NOTICE_ID_RE = /^[A-Za-z0-9:._-]{1,80}$/;
+var NOTICE_KIND_RE = /^[a-z_]{1,16}$/;
+var MAX_NOTICE_TITLE = 80;
+var MAX_NOTICE_BODY = 300;
+var oneLine = (v, max2) => typeof v === "string" ? sanitizeText(v).replace(/\s+/g, " ").trim().slice(0, max2) : "";
+function parseNotice(raw, now = Date.now()) {
+  const o = raw;
+  if (!o || typeof o !== "object") return null;
+  if (typeof o.id !== "string" || !NOTICE_ID_RE.test(o.id) || !isSuiteApp(o.app)) return null;
+  if (typeof o.kind !== "string" || !NOTICE_KIND_RE.test(o.kind)) return null;
+  const until = num(o.until);
+  if (until === void 0 || until <= now) return null;
+  let msg;
+  if (o.msg !== void 0) {
+    if (!o.msg || typeof o.msg !== "object" || Array.isArray(o.msg) || JSON.stringify(o.msg).length > MAX_NOTICE_MSG) return null;
+    msg = o.msg;
+  }
+  return compact({
+    id: o.id,
+    app: o.app,
+    kind: o.kind,
+    title: oneLine(o.title, MAX_NOTICE_TITLE) || "Unknown",
+    body: oneLine(o.body, MAX_NOTICE_BODY),
+    msg,
+    ts: num(o.ts) ?? now,
+    until: Math.min(until, now + MAX_NOTICE_TTL)
+  });
+}
+function newestNotices(list, key) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const n of list) {
+    if (!n || seen.has(key(n))) continue;
+    seen.add(key(n));
+    out.push(n);
+  }
+  return out.sort((a, b) => a.ts - b.ts).slice(-MAX_NOTICES);
+}
+function parseInbox(raw, now = Date.now()) {
+  const o = raw ?? {};
+  const list = Array.isArray(o.notices) ? o.notices : [];
+  const notices = newestNotices(
+    list.map((r) => {
+      const n = parseNotice(r, now);
+      const from = r?.from;
+      if (!n || typeof from !== "string" || !PEER_ID_RE.test(from)) return null;
+      return { ...n, from, ...r.local === true ? { local: true } : {} };
+    }),
+    (n) => `${n.from}/${n.id}`
+  );
+  const waiting = {};
+  if (o.waiting && typeof o.waiting === "object" && !Array.isArray(o.waiting)) {
+    for (const [k, w] of Object.entries(o.waiting)) {
+      const n = num(w?.n);
+      if (!isSuiteApp(k) || n === void 0 || n < 0) continue;
+      waiting[k] = { n: Math.floor(n), ...w.live === true ? { live: true } : {} };
+    }
+  }
+  return { v: 1, notices, waiting };
+}
+function parseOutbox(raw, now = Date.now()) {
+  const list = raw?.notices;
+  const notices = newestNotices(
+    (Array.isArray(list) ? list : []).map((r) => {
+      const n = parseNotice(r, now);
+      const o = r;
+      if (!n || typeof o.to !== "string" || !PEER_ID_RE.test(o.to)) return null;
+      return { ...n, to: o.to, ...o.sent === true ? { sent: true } : {}, ...o.withdrawn === true ? { withdrawn: true } : {} };
+    }),
+    (n) => `${n.to}/${n.id}`
+  );
+  return { v: 1, notices };
 }
 
 // src/ui/effects.ts
@@ -1610,7 +1694,7 @@ var CommandRegistry = class {
 };
 
 // src/core/store.ts
-import crypto8 from "crypto";
+import crypto9 from "crypto";
 
 // ../termcore/src/app/toasts.ts
 var TOAST_MS = 4e3;
@@ -1871,17 +1955,33 @@ import fs5 from "fs";
 import path8 from "path";
 function registerRun(runDir, info) {
   const file = path8.join(runDir, `${info.app}.json`);
-  const entry = { ...info, pid: process.pid, startedAt: Date.now() };
-  try {
-    writeJsonAtomic(file, entry);
-  } catch {
-    return () => {
-    };
-  }
-  return () => {
+  let entry = { ...info, pid: process.pid, startedAt: Date.now() };
+  const write = () => {
     try {
-      if (readJson(file, null)?.pid === process.pid) fs5.rmSync(file, { force: true });
+      writeJsonAtomic(file, entry);
+      return true;
     } catch {
+      return false;
+    }
+  };
+  if (!write()) return { update: () => {
+  }, remove: () => {
+  } };
+  let removed = false;
+  return {
+    update(status) {
+      if (removed) return;
+      const next = { ...entry, ...status };
+      if (JSON.stringify(next) === JSON.stringify(entry)) return;
+      entry = next;
+      write();
+    },
+    remove() {
+      removed = true;
+      try {
+        if (readJson(file, null)?.pid === process.pid) fs5.rmSync(file, { force: true });
+      } catch {
+      }
     }
   };
 }
@@ -3355,6 +3455,8 @@ var Hub = class {
     this.peers = new SharedFile(paths.peers, { locksDir, parse: parsePeersFile });
     this.settings = new SharedFile(paths.settings, { locksDir, parse: parseSettings });
     this.links = new SharedFile(paths.links, { locksDir, parse: parseLinksFile });
+    this.inbox = new SharedFile(paths.inbox, { locksDir, parse: (raw) => parseInbox(raw) });
+    this.outbox = new SharedFile(paths.outbox, { locksDir, parse: (raw) => parseOutbox(raw) });
   }
   identity;
   profile;
@@ -3362,6 +3464,10 @@ var Hub = class {
   peers;
   settings;
   links;
+  /** notices friends sent for my apps, and what each app has waiting (termhub's badges) */
+  inbox;
+  /** notices my apps send to friends whose app isn't open */
+  outbox;
   /**
    * Run once at startup, before anything reads the hub: migrates the apps' old data on the
    * first start of a new version (see migrate.ts).
@@ -3396,7 +3502,7 @@ var Hub = class {
     }
   }
   files() {
-    return [this.profile, this.friends, this.peers, this.settings, this.links];
+    return [this.profile, this.friends, this.peers, this.settings, this.links, this.inbox, this.outbox];
   }
   get me() {
     return this.profile.get();
@@ -3465,7 +3571,15 @@ function migrationNotice(friends) {
   return `Your profile and ${friends === 1 ? "1 friend" : `${friends} friends`} moved to ~/.termhub \u2013 shared by termchat, keyrace, termdrop and termhub`;
 }
 
+// ../termcore/src/friends/notices.ts
+import crypto7 from "crypto";
+
 // ../termcore/src/friends/wire.ts
+var MAX_NOTICE_IDS = 100;
+function noticeIds(v) {
+  if (!Array.isArray(v) || v.length > MAX_NOTICE_IDS) return null;
+  return v.filter((x) => typeof x === "string" && x.length <= 80);
+}
 var NO_EXTENSION = { parse: () => null };
 function parseJsonObject(buf) {
   let o;
@@ -3508,6 +3622,18 @@ function parseWire(buf, ext = NO_EXTENSION) {
       const links = o.links.map(parseLink).filter((l) => l !== null);
       return { t: "links", links };
     }
+    case "notice": {
+      const n = parseNotice(o);
+      return n ? { t: "notice", ...n } : null;
+    }
+    case "unnotice": {
+      const ids = noticeIds(o.ids);
+      return ids ? { t: "unnotice", ids } : null;
+    }
+    case "noticed": {
+      const ids = noticeIds(o.ids);
+      return ids ? { t: "noticed", ids, ...o.gone === true ? { gone: true } : {} } : null;
+    }
     case "decline":
     case "ping":
     case "pong":
@@ -3516,6 +3642,353 @@ function parseWire(buf, ext = NO_EXTENSION) {
     default:
       return ext.parse(o);
   }
+}
+
+// ../termcore/src/friends/courier.ts
+var WAIT_MS = 1500;
+async function travel(t) {
+  const network = new Network({
+    protocol: t.protocol,
+    me: t.me,
+    getName: () => t.name,
+    parse: (plain) => parseWire(plain)
+  });
+  let session = null;
+  try {
+    session = await network.dial(t.ip, t.port, t.peerId ?? void 0);
+    const s = session;
+    if (t.peerId && s.peerId !== t.peerId) throw new Error("Someone else is now reachable at this address");
+    const answer = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), t.waitMs ?? WAIT_MS);
+      timer.unref();
+      s.on("message", (m) => {
+        if (!t.answer(m)) return;
+        clearTimeout(timer);
+        resolve(m);
+      });
+      s.on("close", () => {
+        clearTimeout(timer);
+        resolve(null);
+      });
+    });
+    if (t.links.length) s.send({ t: "links", links: t.links });
+    for (const m of t.send) s.send(m);
+    return {
+      peerId: s.peerId,
+      peerName: s.peerName,
+      publicKey: s.peerPublicRaw.toString("base64url"),
+      remoteAddress: s.remoteAddress,
+      answer: await answer
+    };
+  } finally {
+    session?.close("Delivered", true);
+    await network.stop();
+  }
+}
+
+// ../termcore/src/friends/notices.ts
+var COURIER_GRACE = 1500;
+var COURIER_RETRY = 2e4;
+var COURIER_MAX_RETRY = 10 * 6e4;
+var TICK_MS = 2e3;
+var LOCAL_TTL = 2 * 6e4;
+var RUN_CACHE_MS = 500;
+var APP_ORDER = ["termhub", "termchat", "keyrace", "termdrop"];
+var keyOf = (who, id) => `${who}/${id}`;
+var NoticeCenter = class {
+  constructor(d) {
+    this.d = d;
+    d.hub.inbox.on("change", () => this.onInbox());
+    d.hub.outbox.on("change", () => this.flush());
+  }
+  timer = null;
+  /** inbox entries we already know (no toast for them) */
+  known = /* @__PURE__ */ new Set();
+  /** outbox entries on their way: the session they went out on, and whether it was the withdrawal */
+  inflight = /* @__PURE__ */ new Map();
+  courierBusy = /* @__PURE__ */ new Set();
+  courierNext = /* @__PURE__ */ new Map();
+  runCache = null;
+  seenSig = "";
+  started = false;
+  get own() {
+    return this.d.app.name;
+  }
+  start() {
+    this.started = true;
+    for (const n of this.d.hub.inbox.get().notices) this.known.add(keyOf(n.from, n.id));
+    this.takeOwn();
+    this.timer = setInterval(() => this.tick(), TICK_MS);
+    this.timer.unref();
+    this.flush();
+  }
+  stop() {
+    this.started = false;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    if (this.d.hub.inbox.get().waiting[this.own]?.live) this.setWaiting(0, true);
+  }
+  // ───────────── Sending ─────────────
+  /** A notice for one of `to`'s other apps. Returns its id. */
+  send(to, n) {
+    const now = Date.now();
+    const id = n.id ?? crypto7.randomUUID();
+    const entry = {
+      id,
+      app: this.own,
+      kind: n.kind,
+      title: n.title,
+      body: n.body,
+      ...n.msg ? { msg: n.msg } : {},
+      ts: now,
+      until: now + n.ttlMs,
+      to
+    };
+    this.d.hub.outbox.update((o) => {
+      o.notices = [...o.notices.filter((x) => !(x.to === to && x.id === id)), entry];
+    });
+    this.courierNext.set(keyOf(to, id), { at: now + COURIER_GRACE, fails: 0 });
+    return id;
+  }
+  /**
+   * Takes a notice back: they're told to forget it. Always explicitly – it may be on its way
+   * through another app of mine right now, without a confirmation yet.
+   */
+  withdraw(id, to) {
+    if (!this.d.hub.outbox.get().notices.some((x) => x.id === id && (!to || x.to === to) && !x.withdrawn)) return;
+    this.d.hub.outbox.update((o) => {
+      o.notices = o.notices.map((x) => {
+        if (x.id !== id || to && x.to !== to) return x;
+        const { sent: _sent, ...rest } = x;
+        return { ...rest, withdrawn: true };
+      });
+    });
+  }
+  /** Forgets a notice without telling anyone (termchat: the message itself got through). */
+  drop(id, to) {
+    if (!this.d.hub.outbox.get().notices.some((x) => x.id === id && (!to || x.to === to))) return;
+    this.d.hub.outbox.update((o) => {
+      o.notices = o.notices.filter((x) => !(x.id === id && (!to || x.to === to)));
+    });
+  }
+  /** Notices on their way (or delivered and still withdrawable), e.g. to know who has one. */
+  outgoing() {
+    return this.d.hub.outbox.get().notices;
+  }
+  /** A short-lived note for my other apps: this app got something itself (never counted). */
+  note(from, n) {
+    const now = Date.now();
+    const entry = { id: n.id ?? crypto7.randomUUID(), app: this.own, kind: n.kind, title: n.title, body: n.body, ts: now, until: now + LOCAL_TTL, from, local: true };
+    this.known.add(keyOf(from, entry.id));
+    this.d.hub.inbox.update((box) => {
+      box.notices = [...box.notices.filter((x) => !(x.from === from && x.id === entry.id)), entry];
+    });
+  }
+  /** What this app has waiting for you (termhub's badge). `live`: only while it runs. */
+  setWaiting(n, live = false) {
+    const want = n > 0 ? { n, ...live ? { live: true } : {} } : void 0;
+    if (JSON.stringify(this.d.hub.inbox.get().waiting[this.own]) === JSON.stringify(want)) return;
+    try {
+      this.d.hub.inbox.update((box) => {
+        if (want) box.waiting[this.own] = want;
+        else delete box.waiting[this.own];
+      });
+    } catch (err) {
+      this.d.log(`Couldn't write the inbox: ${err.message}`);
+    }
+  }
+  // ───────────── My apps ─────────────
+  /** The other suite apps running on this computer. */
+  others() {
+    const now = Date.now();
+    if (!this.runCache || now - this.runCache.at > RUN_CACHE_MS) {
+      this.runCache = { at: now, list: runningApps(this.d.hub.paths.runDir).filter((r) => r.app !== this.own || r.pid !== process.pid) };
+    }
+    return this.runCache.list;
+  }
+  isRunning(app) {
+    return app === this.own || this.others().some((r) => r.app === app);
+  }
+  /** The apps of `id` that my other apps see online right now. */
+  elsewhere(id) {
+    const apps = /* @__PURE__ */ new Set();
+    for (const r of this.others()) for (const a of r.seen?.[id] ?? []) if (a in SUITE) apps.add(a);
+    apps.delete(this.own);
+    return APP_ORDER.filter((a) => apps.has(a));
+  }
+  /** Another app of mine is connected to them (it passes notices on). */
+  relayed(id) {
+    return this.others().some((r) => r.sessions?.includes(id));
+  }
+  // ───────────── Delivery ─────────────
+  due() {
+    const now = Date.now();
+    return this.d.hub.outbox.get().notices.filter((n) => n.until > now && (!n.sent || n.withdrawn));
+  }
+  wireOf(n) {
+    if (n.withdrawn) return { t: "unnotice", ids: [n.id] };
+    const { to: _to, sent: _sent, withdrawn: _w, ...notice } = n;
+    return { t: "notice", ...notice };
+  }
+  /** Passes due notices on over our own sessions. */
+  flush() {
+    if (!this.started) return;
+    for (const n of this.due()) {
+      if (n.app === this.own && !n.withdrawn) continue;
+      const s = this.d.network.get(n.to);
+      const key = keyOf(n.to, n.id);
+      const gone = !!n.withdrawn;
+      const busy = this.inflight.get(key);
+      if (!s?.isOpen || !this.d.isFriend(n.to) || busy?.s === s && busy.gone === gone) continue;
+      if (s.send(this.wireOf(n))) this.inflight.set(key, { s, gone });
+    }
+  }
+  onSession() {
+    this.flush();
+  }
+  onOffline(id) {
+    for (const k of [...this.inflight.keys()]) if (k.startsWith(`${id}/`)) this.inflight.delete(k);
+  }
+  /** They confirmed notices (`gone`: withdrawals). */
+  confirmed(from, ids, gone) {
+    for (const id of ids) if (this.inflight.get(keyOf(from, id))?.gone === gone) this.inflight.delete(keyOf(from, id));
+    const set = new Set(ids);
+    const hit = (n) => n.to === from && set.has(n.id) && !!n.withdrawn === gone;
+    if (!this.d.hub.outbox.get().notices.some(hit)) return;
+    this.d.hub.outbox.update((o) => {
+      o.notices = o.notices.flatMap((n) => {
+        if (!hit(n)) return [n];
+        return gone ? [] : [{ ...n, sent: true }];
+      });
+    });
+  }
+  tick() {
+    this.flush();
+    this.courierRound();
+    const sig = JSON.stringify(this.others().map((r) => [r.app, r.seen ?? {}]));
+    if (sig !== this.seenSig) {
+      this.seenSig = sig;
+      this.d.changed();
+    }
+  }
+  /** Notices nobody could pass on: deliver them in a short session in an app of theirs. */
+  courierRound() {
+    const now = Date.now();
+    for (const n of this.due()) {
+      if (n.app !== this.own && !(this.own === "termhub" && !this.isRunning(n.app))) continue;
+      if (this.courierBusy.has(n.to) || this.d.network.get(n.to)?.isOpen || this.relayed(n.to)) continue;
+      const key = keyOf(n.to, n.id);
+      const next = this.courierNext.get(key) ?? { at: 0, fails: 0 };
+      if (now < next.at) continue;
+      const targets = this.d.targets(n.to).filter((t) => !this.isRunning(t.app));
+      if (!targets.length) continue;
+      void this.carry(n, targets, next.fails);
+    }
+  }
+  async carry(n, targets, fails) {
+    const key = keyOf(n.to, n.id);
+    this.courierBusy.add(n.to);
+    try {
+      for (const t of targets) {
+        try {
+          const r = await travel({
+            protocol: `${t.app}/1`,
+            ip: t.ip,
+            port: t.port,
+            peerId: n.to,
+            me: this.d.identity,
+            name: this.d.name(),
+            links: this.d.links(),
+            send: [this.wireOf(n)],
+            answer: (m) => m.t === "noticed" && m.ids.includes(n.id) && !!m.gone === !!n.withdrawn,
+            waitMs: this.d.courierWaitMs
+          });
+          if (r.answer) {
+            this.d.log(`Notice ${n.id} for ${n.to} delivered through ${t.app}`);
+            this.courierNext.delete(key);
+            this.confirmed(n.to, [n.id], !!n.withdrawn);
+            return;
+          }
+        } catch (err) {
+          this.d.log(`Couldn't deliver notice ${n.id} to ${n.to} through ${t.app} (${t.ip}:${t.port}): ${err.message}`);
+        }
+      }
+      this.courierNext.set(key, { at: Date.now() + Math.min(COURIER_RETRY * 2 ** fails, COURIER_MAX_RETRY), fails: fails + 1 });
+    } finally {
+      this.courierBusy.delete(n.to);
+    }
+  }
+  // ───────────── Receiving ─────────────
+  /** `notice`, `unnotice` and `noticed` from a session. */
+  onWire(s, m) {
+    const from = s.peerId;
+    if (m.t === "noticed") return this.confirmed(from, m.ids, m.gone === true);
+    if (!this.d.isFriend(from)) return;
+    if (m.t === "unnotice") {
+      const set = new Set(m.ids);
+      if (this.d.hub.inbox.get().notices.some((n) => n.from === from && set.has(n.id))) {
+        this.d.hub.inbox.update((box) => {
+          box.notices = box.notices.filter((n) => !(n.from === from && set.has(n.id)));
+        });
+      }
+      s.send({ t: "noticed", ids: m.ids, gone: true });
+      return;
+    }
+    const { t: _t, ...notice } = m;
+    const key = keyOf(from, notice.id);
+    let fresh = false;
+    if (!this.known.has(key)) {
+      this.d.hub.inbox.update((box) => {
+        if (box.notices.some((n) => n.from === from && n.id === notice.id)) return;
+        fresh = true;
+        box.notices = [...box.notices, { ...notice, from }];
+      });
+    }
+    s.send({ t: "noticed", ids: [notice.id] });
+    if (fresh) this.bannerFor({ ...notice, from });
+  }
+  /** A banner only when nobody shows it otherwise: the app it's about isn't open, and none of mine is in front. */
+  bannerFor(n) {
+    if (this.d.dnd() || this.isRunning(n.app)) return;
+    if (this.d.front() || this.others().some((r) => r.front)) return;
+    this.d.banner(`${n.app} \xB7 ${n.title}`, n.body);
+  }
+  onInbox() {
+    if (!this.started) return;
+    const box = this.d.hub.inbox.get();
+    const fresh = [];
+    const now = /* @__PURE__ */ new Set();
+    for (const n of box.notices) {
+      const key = keyOf(n.from, n.id);
+      now.add(key);
+      if (!this.known.has(key)) fresh.push(n);
+    }
+    this.known = now;
+    if (!this.d.dnd()) {
+      for (const n of fresh) if (n.app !== this.own) this.d.show?.(n);
+    }
+    this.takeOwn();
+  }
+  /** The notices about this app: it takes them. */
+  takeOwn() {
+    const take = this.d.take;
+    if (!take) return;
+    const mine = this.d.hub.inbox.get().notices.filter((n) => n.app === this.own && !n.local);
+    if (!mine.length) return;
+    const ids = new Set(mine.map((n) => keyOf(n.from, n.id)));
+    this.d.hub.inbox.update((box) => {
+      box.notices = box.notices.filter((n) => !ids.has(keyOf(n.from, n.id)));
+    });
+    try {
+      take(mine.filter((n) => this.d.isFriend(n.from)));
+    } catch (err) {
+      this.d.log(`Couldn't take notices: ${err.message}`);
+    }
+  }
+};
+function noticeLine(n) {
+  const chat = n.kind === "msg" || n.kind === "gmsg";
+  return `${n.app} \xB7 ${n.title}${n.body ? `${chat ? ":" : ""} ${n.body}` : ""}`;
 }
 
 // ../termcore/src/friends/net.ts
@@ -3559,6 +4032,24 @@ var FriendNet = class {
       unreachable: (id, info) => this.event({ kind: "unreachable", id, who: this.peerName(id), ...info }),
       portOf: (p) => this.ownPort(p)
     });
+    this.notices = new NoticeCenter({
+      app,
+      hub,
+      identity: this.identity,
+      network: this.network,
+      name: () => this.name,
+      links: () => hub.myLinks(),
+      isFriend: (id) => this.contacts.get(id)?.state === "accepted",
+      targets: (id) => this.courierTargets(id),
+      front: () => opts.hooks.front?.() ?? this.focused,
+      banner: (title, body) => this.banner(title, body),
+      dnd: () => this.dnd,
+      show: (n) => this.event({ kind: "notice", notice: n, who: n.local ? n.title : this.peerName(n.from) }),
+      take: opts.hooks.takeNotices ? (list) => opts.hooks.takeNotices(list) : void 0,
+      log: (l) => this.log(l),
+      changed: () => this.changed(),
+      courierWaitMs: opts.courierWaitMs
+    });
     this.network.on("session", (s) => this.onSession(s));
     this.network.on("purpose", (c2) => opts.hooks.purpose ? opts.hooks.purpose(c2) : c2.fs.destroy());
     this.network.on("offline", (id) => this.onOffline(id));
@@ -3588,7 +4079,9 @@ var FriendNet = class {
   focused = true;
   presenceMap = /* @__PURE__ */ new Map();
   lastStates;
-  unregisterRun = null;
+  notices;
+  runEntry = null;
+  runTimer = null;
   started = false;
   /** Sessions with peers we don't know yet: our state waits for their first message. */
   awaitingFirst = /* @__PURE__ */ new WeakSet();
@@ -3598,8 +4091,10 @@ var FriendNet = class {
     await this.network.start(opts.port ?? this.app.tcpPort);
     this.started = true;
     const udpPort = opts.discoveryPort ?? this.app.udpPort;
-    this.unregisterRun = registerRun(this.hub.paths.runDir, { app: this.app.name, port: this.network.port, udp: udpPort, version: this.app.version });
+    this.runEntry = registerRun(this.hub.paths.runDir, { app: this.app.name, port: this.network.port, udp: udpPort, version: this.app.version });
+    this.writeRun();
     this.hub.watch();
+    this.notices.start();
     this.runRekey();
     if (opts.discovery !== false) {
       const d = new Discovery(this.identity.id, () => this.name, () => this.network.port, {
@@ -3622,12 +4117,15 @@ var FriendNet = class {
   }
   async stop() {
     this.started = false;
+    this.notices.stop();
+    if (this.runTimer) clearTimeout(this.runTimer);
+    this.runTimer = null;
     this.dialer.stop();
     this.discoveryRef?.stop();
     await this.network.stop();
     this.hub.close();
-    this.unregisterRun?.();
-    this.unregisterRun = null;
+    this.runEntry?.remove();
+    this.runEntry = null;
   }
   get discovery() {
     return this.discoveryRef;
@@ -3681,6 +4179,7 @@ var FriendNet = class {
   setFocused(focused) {
     if (this.focused === focused) return;
     this.focused = focused;
+    this.refreshRun();
     this.broadcastPresence();
     this.changed();
   }
@@ -3692,6 +4191,68 @@ var FriendNet = class {
     if (this.focused || !this.notificationsEnabled() || this.dnd) return;
     if (this.opts.notify) this.opts.notify(title, body);
     else notify(title, body, this.app.name);
+  }
+  /** Desktop banner regardless of focus (notices decide themselves who shows what). */
+  banner(title, body) {
+    if (!this.notificationsEnabled() || this.dnd) return;
+    if (this.opts.notify) this.opts.notify(title, body);
+    else notify(title, body, this.app.name);
+  }
+  // ───────────── Notices (see notices.ts) ─────────────
+  /** A notice for `to`'s other apps (they don't have this one open). Returns its id. */
+  sendNotice(to, n) {
+    return this.notices.send(to, n);
+  }
+  /** Takes a notice back (they're told if it reached them already). */
+  withdrawNotice(id, to) {
+    this.notices.withdraw(id, to);
+  }
+  /** Forgets a notice quietly (the real thing got through). */
+  dropNotice(id, to) {
+    this.notices.drop(id, to);
+  }
+  /** A short note for my other apps: something arrived here (they show it as a toast). */
+  noteLocally(from, n) {
+    try {
+      this.notices.note(from, n);
+    } catch (err) {
+      this.log(`Couldn't write the inbox: ${err.message}`);
+    }
+  }
+  /** What this app has waiting for you (termhub's badge). `live`: only counts while the app runs. */
+  setWaiting(n, live = false) {
+    this.notices.setWaiting(n, live);
+  }
+  /** The apps a friend has open that my other apps see (not this one). */
+  elsewhere(id) {
+    return this.contacts.get(id)?.state === "accepted" ? this.notices.elsewhere(id) : [];
+  }
+  /** Where a friend's apps listen right now (discovery), else where they did last time. */
+  courierTargets(id) {
+    const order2 = ["termhub", "termchat", "keyrace", "termdrop"];
+    const out = [];
+    const p = this.discovered(id);
+    const raw = this.contacts.raw(id);
+    const ip = p?.ip ?? raw?.lastIp;
+    if (!ip) return out;
+    const ports = { ...raw?.ports, ...p ? { ...p.apps, [p.app]: p.port } : {} };
+    for (const app of this.notices.elsewhere(id)) ports[app] ??= SUITE[app].tcpPort;
+    for (const [app, port] of Object.entries(ports)) if (port && app !== this.app.name) out.push({ app, ip, port });
+    return out.sort((a, b) => order2.indexOf(a.app) - order2.indexOf(b.app));
+  }
+  /** Writes who we're connected to, who we see and whether we're in front into our run file (soon). */
+  refreshRun() {
+    if (!this.started || this.runTimer) return;
+    this.runTimer = setTimeout(() => {
+      this.runTimer = null;
+      this.writeRun();
+    }, 150);
+    this.runTimer.unref();
+  }
+  writeRun() {
+    const sessions = [...this.network.sessions.keys()].filter((id) => this.contacts.get(id)?.state === "accepted").sort();
+    const seen = this.opts.hooks.seen?.() ?? Object.fromEntries(sessions.map((id) => [id, [this.app.name]]));
+    this.runEntry?.update({ front: this.opts.hooks.front?.() ?? this.focused, sessions, seen });
   }
   // ───────────── Queries ─────────────
   isOnline(id) {
@@ -3892,6 +4453,7 @@ var FriendNet = class {
       }
     }
     this.dialer.discovered(seen);
+    if (this.opts.hooks.seen) this.refreshRun();
     this.changed();
   }
   onProfileChanged() {
@@ -3984,11 +4546,15 @@ var FriendNet = class {
     const own = this.ownPresence();
     if (Object.keys(own).length > 2 || own.away) this.sendPresence(id);
     this.opts.hooks.session?.(s);
+    this.notices.onSession();
+    this.refreshRun();
     this.log(`Connected to ${s.peerName} (${id}) via ${s.remoteAddress}`);
     this.changed();
   }
   onOffline(id) {
     this.presenceMap.delete(id);
+    this.notices.onOffline(id);
+    this.refreshRun();
     this.opts.hooks.offline?.(id);
     if (this.contacts.get(id)) this.contacts.upsert(id, { lastSeen: Date.now() });
     this.changed();
@@ -4038,6 +4604,10 @@ var FriendNet = class {
         this.changed();
         return;
       }
+      case "notice":
+      case "unnotice":
+      case "noticed":
+        return this.notices.onWire(s, base);
       case "ping":
       case "pong":
       case "bye":
@@ -4144,7 +4714,7 @@ import fs11 from "fs";
 import path13 from "path";
 
 // src/core/groupEvents.ts
-import crypto7 from "crypto";
+import crypto8 from "crypto";
 var MAX_MEMBERS = 32;
 var EVENT_ID_RE = /^[A-Za-z0-9_-]{32}$/;
 var PEER_ID_RE2 = /^[A-Z2-7]{20}$/;
@@ -4157,7 +4727,7 @@ function payload2(e) {
   return Buffer.from(JSON.stringify(["termchat/group/1", gid, e.author, e.authorPub, e.seq, e.ts, e.kind, data]));
 }
 function eventId(p) {
-  return crypto7.createHash("sha256").update(p).digest("base64url").slice(0, 32);
+  return crypto8.createHash("sha256").update(p).digest("base64url").slice(0, 32);
 }
 function signEvent(me, fields) {
   const unsigned = {
@@ -4172,7 +4742,7 @@ function signEvent(me, fields) {
   };
   const p = payload2(unsigned);
   const id = eventId(p);
-  const sig = crypto7.sign(null, p, me.privateKey).toString("base64url");
+  const sig = crypto8.sign(null, p, me.privateKey).toString("base64url");
   return { ...unsigned, gid: fields.kind === "create" ? id : fields.gid, id, sig };
 }
 var str = (v, max2) => typeof v === "string" && v.length <= max2;
@@ -4216,7 +4786,7 @@ function verifyEvent(e) {
   if (eventId(p) !== e.id) return false;
   if (e.kind === "create" ? e.gid !== e.id : e.gid === e.id) return false;
   try {
-    return crypto7.verify(null, p, publicKeyFromRaw(pub), Buffer.from(e.sig, "base64url"));
+    return crypto8.verify(null, p, publicKeyFromRaw(pub), Buffer.from(e.sig, "base64url"));
   } catch {
     return false;
   }
@@ -4810,6 +5380,8 @@ var isGroupChat = (chatId) => chatId.startsWith(GROUP_PREFIX);
 var groupChatId = (gid) => GROUP_PREFIX + gid;
 var gidOf = (chatId) => chatId.slice(GROUP_PREFIX.length);
 var md = (s) => s.replace(/[\\`*_~#>\[\]|]/g, (ch) => `\\${ch}`);
+var NOTICE_TTL = 3 * 24 * 36e5;
+var preview = (text, max2) => text.replace(/\s+/g, " ").trim().slice(0, max2);
 var AppStore = class {
   constructor(opts) {
     this.opts = opts;
@@ -4833,7 +5405,10 @@ var AppStore = class {
         log: (l) => this.log(l),
         event: (e) => this.onEvent(e),
         message: (s, m) => this.onMessage(s, m),
-        session: (s) => this.groups.onSessionUp(s.peerId),
+        session: (s) => {
+          for (const n of this.net.notices.outgoing()) if (n.to === s.peerId && n.app === "termchat") this.net.dropNotice(n.id, n.to);
+          this.groups.onSessionUp(s.peerId);
+        },
         offline: (id) => this.groups.onSessionDown(id),
         stateMessage: (s, m) => {
           if (this.groups.sharesGroup(s.peerId)) {
@@ -4850,7 +5425,8 @@ var AppStore = class {
         extraHints: () => [...this.groups.peers()].map((id) => this.net.peerBook.get(id)?.lastIp).filter((ip) => !!ip),
         knowsId: (id) => this.history.hasChat(id),
         rekey: (oldId, newId) => this.history.rekey(oldId, newId),
-        settings: (s) => this.applySettings(s)
+        settings: (s) => this.applySettings(s),
+        takeNotices: (list) => this.takeNotices(list)
       }
     });
     this.applySettings(this.hub.settings.get());
@@ -4877,6 +5453,9 @@ var AppStore = class {
   listeners = /* @__PURE__ */ new Set();
   notifyQueued = false;
   activeChat = null;
+  started = false;
+  /** taking notices: what they carry was shown in another app already */
+  replaying = false;
   version = 0;
   /** Newer version on GitHub (checked by the UI at launch), shown in the header. */
   updateAvailable = null;
@@ -4901,6 +5480,7 @@ var AppStore = class {
   // ───────────── Lifecycle ─────────────
   async start() {
     await this.net.start();
+    this.started = true;
     this.changed();
   }
   async stop() {
@@ -4919,8 +5499,20 @@ var AppStore = class {
     this.notifyQueued = true;
     queueMicrotask(() => {
       this.notifyQueued = false;
+      this.syncWaiting();
       for (const fn of this.listeners) fn();
     });
+  }
+  /** Unread messages, for termhub's badge. */
+  syncWaiting() {
+    if (!this.started) return;
+    let n = 0;
+    for (const c2 of this.contacts.all()) if (c2.state === "accepted") n += c2.unread ?? 0;
+    for (const g of this.groups.list()) {
+      const status = this.groups.myStatus(g.gid);
+      if (status === "member") n += this.groups.metaOf(g.gid).unread;
+    }
+    this.net.setWaiting(n);
   }
   applySettings(s) {
     if (setAccent(s.accent)) this.changed();
@@ -4956,6 +5548,7 @@ var AppStore = class {
       display: displayName(c2),
       online,
       inactive: online && (p?.away ?? false),
+      elsewhere: online ? [] : this.net.elsewhere(id),
       unread: c2.unread ?? 0,
       status: p?.status ?? "available",
       ...p?.msg ? { statusMsg: p.msg } : {},
@@ -5116,7 +5709,7 @@ var AppStore = class {
     }
   }
   note(chatId, text, kind = "info") {
-    const list = [...this.notesFor(chatId), { id: crypto8.randomUUID(), ts: Date.now(), text, kind }];
+    const list = [...this.notesFor(chatId), { id: crypto9.randomUUID(), ts: Date.now(), text, kind }];
     this.notes.set(chatId, list.slice(-50));
     this.changed();
   }
@@ -5160,6 +5753,8 @@ var AppStore = class {
           `Can't reach ${md(e.who)} at ${e.ip}:${e.port} yet (${md(e.error)}) \u2013 still trying. If this stays, a firewall is probably blocking termchat on one of your computers: on Windows, allow Node.js for public networks; on macOS, allow incoming connections for node.`,
           "error"
         );
+      case "notice":
+        return this.showToast(noticeLine(e.notice));
       case "linked":
         for (const map of [this.notes, this.viewCutoffs]) {
           if (map.has(e.oldId) && !map.has(e.id)) map.set(e.id, map.get(e.oldId));
@@ -5179,11 +5774,13 @@ var AppStore = class {
     if (c2.state === "incoming") return { ok: false, error: "Accept the request first: /accept" };
     if (c2.state === "blocked") return { ok: false, error: "Contact is blocked: /unblock" };
     if (c2.state === "declined") return { ok: false, error: "Your request was declined. Ask again: /request" };
-    const msg = { id: crypto8.randomUUID(), from: "me", text, ts: Date.now(), status: "pending" };
+    const msg = { id: crypto9.randomUUID(), from: "me", text, ts: Date.now(), status: "pending" };
     this.history.add(id, msg);
     this.contacts.upsert(id, { lastActivity: msg.ts });
-    if (c2.state === "accepted") this.network.get(id)?.send({ t: "msg", id: msg.id, ts: msg.ts, text: msg.text });
-    else this.net.tryDial(id);
+    if (c2.state !== "accepted") this.net.tryDial(id);
+    else if (!this.network.get(id)?.send({ t: "msg", id: msg.id, ts: msg.ts, text: msg.text })) {
+      this.net.sendNotice(id, { id: msg.id, kind: "msg", title: this.net.name, body: preview(text, 120), msg: { t: "msg", id: msg.id, ts: msg.ts, text }, ttlMs: NOTICE_TTL });
+    }
     this.changed();
     return { ok: true };
   }
@@ -5276,7 +5873,22 @@ var AppStore = class {
   }
   sendGroupMessage(chatId, raw) {
     try {
-      this.groups.send(gidOf(chatId), raw);
+      const gid = gidOf(chatId);
+      const ev = this.groups.send(gid, raw);
+      const state = this.groups.get(gid);
+      if (state) {
+        for (const m of state.members.values()) {
+          if (m.id === this.identity.id || m.status !== "member" || this.contacts.get(m.id)?.state !== "accepted" || this.isOnline(m.id)) continue;
+          this.net.sendNotice(m.id, {
+            id: ev.id,
+            kind: "gmsg",
+            title: `#${state.name}`,
+            body: `${this.net.name}: ${preview(ev.data.text ?? "", 100)}`,
+            msg: { t: "gev", gid, evs: [ev] },
+            ttlMs: NOTICE_TTL
+          });
+        }
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -5284,13 +5896,14 @@ var AppStore = class {
   }
   onGroupMessage(gid, ev, state) {
     const chatId = groupChatId(gid);
-    const preview = sanitizeText(ev.data.text ?? "").replace(/\s+/g, " ").slice(0, 60);
-    this.net.notify(`#${state.name}`, `${this.peerName(ev.author, state)}: ${preview}`);
+    const short = preview(sanitizeText(ev.data.text ?? ""), 60);
+    this.net.notify(`#${state.name}`, `${this.peerName(ev.author, state)}: ${short}`);
     if (this.activeChat === chatId) {
       this.groups.markRead(gid);
       return;
     }
-    if (!this.net.dnd) this.showToast(`#${state.name} \xB7 ${this.peerName(ev.author, state)}: ${preview}`, "info", chatId);
+    if (!this.replaying) this.net.noteLocally(ev.author, { id: ev.id, kind: "gmsg", title: `#${state.name}`, body: `${this.peerName(ev.author, state)}: ${short}` });
+    if (!this.net.dnd) this.showToast(`#${state.name} \xB7 ${this.peerName(ev.author, state)}: ${short}`, "info", chatId);
   }
   // ───────────── Presence and notifications ─────────────
   /** Terminal window gained/lost focus. Terminals without focus reporting stay "focused". */
@@ -5335,10 +5948,8 @@ var AppStore = class {
           const active = this.activeChat === id;
           this.net.notify(displayName(c2), m.text.replace(/\s+/g, " ").slice(0, 100));
           this.contacts.mutate(id, (cur) => ({ lastActivity: Date.now(), unread: active ? void 0 : (cur?.unread ?? 0) + 1 }));
-          if (!active && !this.net.dnd) {
-            const preview = m.text.replace(/\s+/g, " ").slice(0, 60);
-            this.showToast(`${displayName(c2)}: ${preview}`, "info", id);
-          }
+          if (!active && !this.replaying) this.net.noteLocally(id, { id: m.id, kind: "msg", title: displayName(c2), body: preview(m.text, 100) });
+          if (!active && !this.net.dnd) this.showToast(`${displayName(c2)}: ${preview(m.text, 60)}`, "info", id);
           this.changed();
         }
         s.send({ t: "ack", ids: [m.id] });
@@ -5356,6 +5967,25 @@ var AppStore = class {
       case "gack":
         this.groups.onWire(id, m);
         return;
+    }
+  }
+  /**
+   * Notices friends sent while termchat wasn't open (their other apps showed them already): the
+   * messages in them arrive now, as if they came over the network. When the friend's termchat
+   * sends them again later, they're already here.
+   */
+  takeNotices(list) {
+    this.replaying = true;
+    try {
+      for (const n of list) {
+        const m = n.msg ? parseChatWire(n.msg) : null;
+        if (!m || m.t !== "msg" && m.t !== "gev") continue;
+        const s = { peerId: n.from, send: () => false };
+        if (m.t === "msg") this.onMessage(s, m);
+        else this.groups.onWire(n.from, m);
+      }
+    } finally {
+      this.replaying = false;
     }
   }
   flushOutbox(id) {
@@ -5619,7 +6249,7 @@ _Name, ID and contacts are shared by termchat, keyrace and termdrop (~/.termhub)
         `### ${c2.display}${c2.alias ? ` _(calls themselves ${c2.name})_` : ""}`,
         "",
         `- **ID** \`${formatId(c2.id, true)}\``,
-        `- **Status** ${c2.inactive ? "inactive" : c2.online ? "online" : "offline"}${c2.online && statusText(c2.status, c2.statusMsg) ? ` \xB7 ${statusText(c2.status, c2.statusMsg)}` : ""} \xB7 ${STATE_LABEL[c2.state] ?? c2.state}`,
+        `- **Status** ${c2.inactive ? "inactive" : c2.online ? "online" : c2.elsewhere.length ? elsewhereText(c2.elsewhere) : "offline"}${c2.online && statusText(c2.status, c2.statusMsg) ? ` \xB7 ${statusText(c2.status, c2.statusMsg)}` : ""} \xB7 ${STATE_LABEL[c2.state] ?? c2.state}`,
         `- **Address** ${c2.lastIp ? `\`${c2.lastIp}:${c2.lastPort ?? "?"}\`` : "unknown"}`,
         `- **Safety code** ${code ? `\`${code}\`` : "not connected yet"}`,
         "",
@@ -6829,7 +7459,7 @@ function Header2({ chat, width }) {
       ] }) : null
     ] });
   } else {
-    const dot = presenceDot({ online: chat.online, away: chat.inactive, status: chat.status });
+    const dot = !chat.online && chat.elsewhere.length ? elsewhereDot() : presenceDot({ online: chat.online, away: chat.inactive, status: chat.status });
     left = /* @__PURE__ */ jsxs8(Fragment3, { children: [
       /* @__PURE__ */ jsxs8(Text8, { color: dot.color, children: [
         dot.icon,
@@ -6842,7 +7472,10 @@ function Header2({ chat, width }) {
         ")"
       ] }) : null,
       /* @__PURE__ */ jsx8(Text8, { color: theme.faint, children: " \xB7 " }),
-      chat.online && chat.status !== "available" ? /* @__PURE__ */ jsx8(Text8, { color: dot.color, children: statusText(chat.status, chat.statusMsg) }) : chat.inactive ? /* @__PURE__ */ jsx8(Text8, { color: theme.warning, children: "inactive" }) : chat.online ? /* @__PURE__ */ jsx8(Text8, { color: theme.success, children: "online" }) : /* @__PURE__ */ jsx8(Text8, { color: theme.dim, children: lastSeen(chat.lastSeen) }),
+      chat.online && chat.status !== "available" ? /* @__PURE__ */ jsx8(Text8, { color: dot.color, children: statusText(chat.status, chat.statusMsg) }) : chat.inactive ? /* @__PURE__ */ jsx8(Text8, { color: theme.warning, children: "inactive" }) : chat.online ? /* @__PURE__ */ jsx8(Text8, { color: theme.success, children: "online" }) : chat.elsewhere.length ? /* @__PURE__ */ jsxs8(Text8, { color: theme.dim, children: [
+        elsewhereText(chat.elsewhere),
+        " \u2013 messages reach them there"
+      ] }) : /* @__PURE__ */ jsx8(Text8, { color: theme.dim, children: lastSeen(chat.lastSeen) }),
       chat.online && chat.status === "available" && chat.statusMsg ? /* @__PURE__ */ jsxs8(Text8, { color: theme.dim, children: [
         " \xB7 ",
         chat.statusMsg
@@ -7267,9 +7900,9 @@ function Row({ entry, selected, width, store }) {
   const c2 = entry.chat;
   const isRequest = entry.type === "request";
   const isGroup = c2.kind === "group";
-  const preview = previewOf(c2, store);
+  const preview2 = previewOf(c2, store);
   const inactive = isGroup ? c2.myStatus !== "member" && c2.myStatus !== "invited" : c2.state !== "accepted";
-  const dot = /* @__PURE__ */ jsx11(Box10, { width: 2, flexShrink: 0, children: isRequest ? /* @__PURE__ */ jsx11(Text11, { color: theme.accent, children: icons.request }) : isGroup ? /* @__PURE__ */ jsx11(Text11, { color: inactive ? theme.faint : theme.accent, bold: true, children: icons.group }) : /* @__PURE__ */ jsx11(Text11, { color: presenceDot({ online: c2.online, away: c2.inactive, status: c2.status }).color, children: presenceDot({ online: c2.online, away: c2.inactive, status: c2.status }).icon }) });
+  const dot = /* @__PURE__ */ jsx11(Box10, { width: 2, flexShrink: 0, children: isRequest ? /* @__PURE__ */ jsx11(Text11, { color: theme.accent, children: icons.request }) : isGroup ? /* @__PURE__ */ jsx11(Text11, { color: inactive ? theme.faint : theme.accent, bold: true, children: icons.group }) : /* @__PURE__ */ jsx11(Text11, { color: (!c2.online && c2.elsewhere.length ? elsewhereDot() : presenceDot({ online: c2.online, away: c2.inactive, status: c2.status })).color, children: (!c2.online && c2.elsewhere.length ? elsewhereDot() : presenceDot({ online: c2.online, away: c2.inactive, status: c2.status })).icon }) });
   const time = c2.last ? shortTime(c2.last.ts) : "";
   const status = c2.kind === "direct" && c2.state === "accepted" && c2.online ? statusText(c2.status, c2.statusMsg) : "";
   const nameColor = selected ? theme.accent : !isGroup && c2.state === "accepted" ? personHex(c2.id, c2.color) : void 0;
@@ -7282,7 +7915,7 @@ function Row({ entry, selected, width, store }) {
         /* @__PURE__ */ jsx11(Text11, { color: presenceDot({ online: true, status: c2.kind === "direct" ? c2.status : void 0 }).color, children: status }),
         /* @__PURE__ */ jsx11(Text11, { color: theme.faint, children: " \xB7 " })
       ] }) : null,
-      /* @__PURE__ */ jsx11(Text11, { color: preview.dim ? theme.dim : void 0, italic: inactive && !isRequest, children: preview.text })
+      /* @__PURE__ */ jsx11(Text11, { color: preview2.dim ? theme.dim : void 0, italic: inactive && !isRequest, children: preview2.text })
     ] }) }),
     /* @__PURE__ */ jsx11(Box10, { width: 9, flexShrink: 0, justifyContent: "flex-end", children: /* @__PURE__ */ jsx11(Text11, { color: theme.faint, children: time }) }),
     /* @__PURE__ */ jsx11(Box10, { width: 5, flexShrink: 0, justifyContent: "flex-end", children: c2.unread > 0 ? /* @__PURE__ */ jsx11(Text11, { backgroundColor: theme.accent, color: theme.onAccent, bold: true, children: ` ${c2.unread > 99 ? "99+" : c2.unread} ` }) : null })

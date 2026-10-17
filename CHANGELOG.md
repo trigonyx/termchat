@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.0 – 2026-10-17
+
+- Messages to friends without termchat open reach them in the app they have open (termhub, keyrace, termdrop) and are waiting in the chat when they open termchat; messages, invites and offers from the other apps show up here too; friends in another app show as ◌ in termhub
+
 ## 2.1.0 – 2026-10-15
 
 - termhub is here: the README says how to get it – it installs, opens and updates the apps
